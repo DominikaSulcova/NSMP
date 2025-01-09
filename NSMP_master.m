@@ -27,10 +27,9 @@
 %                   - saves for letswave
 %               2) pre-process TEPs: letswave
 %                   - interpolates channels if necessary
-%                   - inputs missed channels
+%                   - inputs missed trials
 %                   - re-labels 'stimulation' events according to conditions
 %                   - re-references to common average
-%                   - removes mastoids?
 %                   - epochs around TMS stimulus 
 %                   - DC + linear detrend per epoch
 %                   - removes TMS artifact via cubic interpolation 
@@ -74,7 +73,7 @@ folder.output = uigetdir(pwd, 'Choose the OneDrive folder');        % output fol
 cd(folder.output)
 
 % output
-study = 'MCITEP';
+study = 'NSMP';
 output_file = sprintf('%s\\%s_output.mat', folder.output, study);
 
 % load info structure
@@ -111,7 +110,7 @@ INFO(subject_idx).handedness = info.session{4};
 INFO(subject_idx).session.date = date;
 INFO(subject_idx).session.start = info.session{6};
 INFO(subject_idx).TMS.rMT = str2num(info.session{5});
-INFO(subject_idx).TMS.intensity = INFO(subject_idx).TMS.rMT * 1.2; % 120% rMT?
+INFO(subject_idx).TMS.intensity = INFO(subject_idx).TMS.rMT * 1.15; 
 
 % input recording info
 prompt = {'sampling rate (Hz):', 'reference:', 'ground:', 'triggers:', 'blocks:'};
@@ -146,7 +145,7 @@ folder.output = uigetdir(pwd, 'Choose the output folder');          % output fol
 cd(folder.processed)
 
 % output
-study = 'MCITEP';
+study = 'NSMP';
 output_file = sprintf('%s\\%s_output.mat', folder.output, study);
 
 % load output structures
@@ -193,7 +192,7 @@ clear output_vars prompt dlgtitle dims definput input
 params.suffix = {'crop' 'ds' 'dc'};
 params.crop_margin = 5;
 params.epoch = [-1 -1.5];
-params.downsample = 20;
+params.downsample = 10;
 % ------------------------- 
 fprintf('section 1: import EEG data & save for letswave\n')
 
@@ -380,7 +379,7 @@ fprintf('section 1 finished.\n\n')
 
 %% 2) pre-process TEPs: letswave
 % ----- section input -----
-params.conditions = {'' ''};
+params.conditions = {'baseline' 'delay' 'no_TMS' 'catch'};
 params.prefix = 'dc ds crop';
 params.suffix = {'reref' 'dc' 'artifact' 'processed'};
 params.interp_chans = 6;
