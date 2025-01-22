@@ -110,13 +110,13 @@ INFO(subject_idx).handedness = info.session{4};
 INFO(subject_idx).session.date = date;
 INFO(subject_idx).session.start = info.session{6};
 INFO(subject_idx).TMS.rMT = str2num(info.session{5});
-INFO(subject_idx).TMS.intensity = INFO(subject_idx).TMS.rMT * 1.15; 
+INFO(subject_idx).TMS.intensity = ceil(INFO(subject_idx).TMS.rMT * 1.15); 
 
 % input recording info
 prompt = {'sampling rate (Hz):', 'reference:', 'ground:', 'triggers:', 'blocks:'};
 dlgtitle = 'recording information';
 dims = [1 50];
-definput = {'5000', 'M1, M2', 'AFz', '1 - start, 2 - stimulation, 3 - imperative, 4 - preparatory', '1,2,3,4,5'};
+definput = {'20000', 'Fz', 'AFz', '1 - start, 2 - stimulation, 4 - imperative, 8 - preparatory', '1,2,3,4,5'};
 info.recording = inputdlg(prompt,dlgtitle,dims,definput);
 
 % update info structure
@@ -139,7 +139,7 @@ clear output_vars info prompt dlgtitle dims definput pattern t
 %% ====================== PART 2: EEG pre-processing ======================
 % directories
 folder.toolbox = uigetdir(pwd, 'Choose the toolbox folder');        % MATLAB toolboxes
-folder.raw = uigetdir(pwd, 'Choose the input folder');              % raw data --> hard-drive or local folder
+folder.raw = uigetdir(pwd, 'Choose the input folder');              % raw data from one session --> hard-drive or local folder
 folder.processed = uigetdir(pwd, 'Choose the data folder');         % processed data --> local folder 
 folder.output = uigetdir(pwd, 'Choose the output folder');          % output folder --> OneDrive folder
 cd(folder.processed)
@@ -175,6 +175,9 @@ else
     save(output_file, 'INFO', 'DATA', 'MEASURES')
 end
 
+% dataset
+params.conditions = {'baseline' 'delay' 'no_TMS' 'catch'};
+
 % current participant
 prompt = {'current subject number:'};
 dlgtitle = 'subject';
@@ -187,52 +190,70 @@ subject_idx = str2num(input{1,1});
 figure_counter = 1;
 clear output_vars prompt dlgtitle dims definput input
 
-%% 1) import & save for letswave
+%% 1) import & pre-process continuous data
 % ----- section input -----
 params.suffix = {'crop' 'ds' 'dc'};
 params.crop_margin = 5;
-params.epoch = [-1 -1.5];
-params.downsample = 10;
+params.downsample = 20;
 % ------------------------- 
-fprintf('section 1: import EEG data & save for letswave\n')
+fprintf('section 1: import & pre-process continuous data\n')
 
 % add letswave 6 to the top of search path
 addpath(genpath([folder.toolbox '\letswave 6']));
 
 % identify import folder and subfolders
-params.folder = sprintf('%s\\%s', folder.raw, INFO(subject_idx).ID);
+session_folders = dir(sprintf('%s\\%s', folder.raw, INFO(subject_idx).ID));
+session_date = datetime(INFO(subject_idx).session.date, 'InputFormat', 'dd-MMM-yyyy', 'Format', 'yyyy-MM-dd');
+session_date = char(session_date);
+for a = 1:length(session_folders)
+    if contains(session_folders(a).name, session_date)
+        params.folder = sprintf('%s\\%s', session_folders(a).folder, session_folders(a).name);
+    end
+end
 params.blocks = INFO(subject_idx).EEG.blocks;
 
-% check avaiable datasets
+% check if identified subfolders are avaiable 
 data2import = dir(params.folder);
 if ~isempty(data2import)
+    % remove all datasets that are not labelled with numbers
     data_idx = logical([]);
-    for c = 1:length(data2import)
-        if isempty(str2num(data2import(c).name))
-            data_idx(c) = true;
+    for b = 1:length(data2import)
+        if isempty(str2num(data2import(b).name))
+            data_idx(b) = true;
         else
-            data2import(c).block = str2num(data2import(c).name);
-            data_idx(c) = false;
+            data2import(b).label = str2num(data2import(b).name);
+            data_idx(b) = false;
         end
     end
     data2import(data_idx) = [];
-    [~, file_idx] = sort([data2import.block]);
+    [~, file_idx] = sort([data2import.label]);
     data2import = data2import(file_idx);
+
+    % check for correct labels
+    file_idx = false(1, length(params.blocks));
+    for b = 1:length(params.blocks)
+        for c = 1:length(data2import)
+            if params.blocks(b) == data2import(c).label
+                file_idx(b) = true;
+            end
+        end
+    end
+    data2import = data2import(file_idx);
+
+    % check number of datasets
     fprintf('%d datasets found in the directory.\n', length(data2import))
+    if length(data2import) ~= length(params.blocks)
+        error('ERROR: This does not match with expected number of datasets (%d)\n.Please verify manually.\n', length(params.blocks))
+    end
 else
     error('ERROR: no datasets found in the directory.\n')
 end
 
-% check number of datasets
-if length(data2import) ~= length(params.blocks)
-    error('ERROR: this does not correspond to the expected number of datasets (%d)!', length(params.blocks))
-end
-
 % load datasets
-fprintf('loading EEG blocks: ')
+fprintf('loading datasets:\n')
 for d = 1:length(data2import)
     % provide update
-    fprintf('%d ...', d)
+    fprintf('--> block %d - ', d)
 
     % create the name
     params.name = sprintf('%s %s b%d', study, INFO(subject_idx).ID, d);
@@ -243,7 +264,7 @@ for d = 1:length(data2import)
     else
         INFO(subject_idx).EEG.dataset(end + 1).block = d;
     end
-    INFO(subject_idx).EEG.dataset(end).subfolder = data2import(d).block;
+    INFO(subject_idx).EEG.dataset(end).subfolder = data2import(d).label;
     INFO(subject_idx).EEG.dataset(end).name = params.name;  
 
     % import the dataset
@@ -259,9 +280,9 @@ addpath(genpath([folder.toolbox '\letswave 7']));
 
 % pre-process continuous data and save for letswave
 fprintf('pre-processing:\n')
-for d = 1:length(dataset.raw)
+for d = 2:length(dataset.raw)
     % provide update
-    fprintf('%s:\n', INFO(subject_idx).EEG.dataset(d).name)
+    fprintf('--> %s\n', INFO(subject_idx).EEG.dataset(d).name)
 
     % select data
     lwdata.header = dataset.raw(d).header;
@@ -275,55 +296,43 @@ for d = 1:length(dataset.raw)
     if d == 1
         INFO(subject_idx).EEG.processing(1).process = 'electrode coordinates assigned';
         INFO(subject_idx).EEG.processing(1).params.layout = 'standard 10-20-cap81';
+        INFO(subject_idx).EEG.processing(1).suffix = [];
         INFO(subject_idx).EEG.processing(1).date = sprintf('%s', date);
     end
 
-    % identify eventcodes
+    % re-label and count events
     fprintf('checking events...\n') 
-    if d == 1
-        params.eventcodes = unique({lwdata.header.events.code});
-        params.event_string = '';
-        for e = 1:length(params.eventcodes)
-            if e == length(params.eventcodes)
-                params.event_string = [params.event_string params.eventcodes{e}];
-            else
-                params.event_string = [params.event_string params.eventcodes{e} '\' ];
-            end
-        end
-        for a = 1:length(INFO(subject_idx).EEG.triggers)
-            prompt(a) = [INFO(subject_idx).EEG.triggers(a).label ':'];
-            definput{a} = params.event_string;
-        end        
-        dlgtitle = 'sort eventcodes';
-        dims = [1 40];
-        params.eventcodes_old = inputdlg(prompt,dlgtitle,dims,definput);
-    end
-
-    % re-label and filter events
     event_idx = logical([]);
-    event_count = zeros(length(INFO(subject_idx).EEG.triggers), 1);
-    for e = 1:length(lwdata.header.events)
-        for a = 1:length(INFO(subject_idx).EEG.triggers)
-            if strcmp(lwdata.header.events(e).code, params.eventcodes_old{a})
-                lwdata.header.events(e).code = INFO(subject_idx).EEG.triggers(a).label;
-                event_idx(e) = false; 
-                event_count(a) = event_count(a) + 1;
-            else
-                event_idx(e) = true; 
-            end
+    for a = 1:length(lwdata.header.events)
+        if isempty(str2num(lwdata.header.events(a).code))
+            event_idx(a) = true;
+        else
+            event_idx(a) = false;
         end
     end
     lwdata.header.events(event_idx) = [];
-
-    % provide update
+    params.eventcodes = unique({lwdata.header.events.code});
+    if length(params.eventcodes) == length(INFO(subject_idx).EEG.triggers)
+        event_count = zeros(length(INFO(subject_idx).EEG.triggers), 1);
+        for e = 1:length(lwdata.header.events)
+            for a = 1:length(INFO(subject_idx).EEG.triggers)
+                if strcmp(lwdata.header.events(e).code, num2str(INFO(subject_idx).EEG.triggers(a).trigger))
+                    lwdata.header.events(e).code = INFO(subject_idx).EEG.triggers(a).label{1};
+                    event_count(a) = event_count(a) + 1;
+                end
+            end
+        end
+    else
+        error('ERROR: wrong number of triggers (%d) was found in the dataset!', length(params.eventcodes))
+    end
+    
+    % update & encode
     fprintf('%d events in total were found in the dataset:\n%s - %d events\n%s - %d events\n%s - %d events\n%s - %d events\n', ...
         length(lwdata.header.events), ...
-        INFO(subject_idx).EEG.triggers(1).label, event_count(1), ...
-        INFO(subject_idx).EEG.triggers(2).label, event_count(2), ...
-        INFO(subject_idx).EEG.triggers(3).label, event_count(3), ...
-        INFO(subject_idx).EEG.triggers(4).label, event_count(4));
-
-    % encode to info structure
+        INFO(subject_idx).EEG.triggers(1).label{1}, event_count(1), ...
+        INFO(subject_idx).EEG.triggers(2).label{1}, event_count(2), ...
+        INFO(subject_idx).EEG.triggers(3).label{1}, event_count(3), ...
+        INFO(subject_idx).EEG.triggers(4).label{1}, event_count(4));
     INFO(subject_idx).EEG.dataset(d).trials = event_count(1);
 
     % crop data
@@ -374,12 +383,11 @@ fprintf('done.\n')
 
 % save and continue
 save(output_file, 'INFO','-append')
-clear params data2import data_idx file_idx a c d  e prompt dlgtitle dims definput event_idx event_count option lwdata
+clear a b c d e session_folders session_date data2import data_idx file_idx  prompt dlgtitle dims definput event_idx event_count option lwdata 
 fprintf('section 1 finished.\n\n')
 
 %% 2) pre-process TEPs: letswave
 % ----- section input -----
-params.conditions = {'baseline' 'delay' 'no_TMS' 'catch'};
 params.prefix = 'dc ds crop';
 params.suffix = {'reref' 'dc' 'artifact' 'processed'};
 params.interp_chans = 6;
@@ -409,7 +417,7 @@ dlgtitle = 'channel interpolation';
 dims = [1 120];
 definput = {strjoin(params.labels,' ')};
 answer = inputdlg(prompt,dlgtitle,dims,definput);
-if ~isempty(answer{a})
+if ~isempty(answer{1})
     % identify channels to interpolate
     chans2interpolate = split(answer{a}, ' ');
 
@@ -493,10 +501,6 @@ for d = 1:length(dataset.raw)
         INFO(subject_idx).EEG.processing(6).suffix = params.suffix{1};
         INFO(subject_idx).EEG.processing(6).date = sprintf('%s', date);
     end
-
-    % remove mastoids?
-    fprintf('removing mastoids...')
-    params.labels = {lwdata.header.chanlocs.labels};
 
     % epoch per condition
     fprintf('epoching ... ')
@@ -618,56 +622,65 @@ params.lwsave = true;                               % --> in that case a followi
 % -------------------------                         % in the calculation of the smoothening function:   if [timeRange(tidx,2) - timeRange(tidx,1)] < 1
 fprintf('section 3: TEP pre-processing - EEGLAB\n')                                                     %   smoothLength = smoothLength / 1000;
                                                                                                         % end
-% add eeglab and fastica to the of search path
-addpath(fullfile(folder_toolbox,'eeglab2022.1'));
-addpath(fullfile(folder_toolbox,'FastICA_25'));
-
-% launch eeglab and generate an empty EEGLAB structure
+% add eeglab to the top of search path and launch
+addpath(fullfile(folder.toolbox, 'EEGLAB'));
 eeglab 
+
+% update figure counter
+fig_all = findall(0, 'Type', 'figure');
+figure_counter = length(fig_all) + 1;
 
 % remove bad epochs
 fprintf('removing bad epochs:\n')
 for c = 1:length(params.conditions)
     fprintf('%s dataset ...', params.conditions{c})
 
-    % load the dataset
+    % load the dataset, re-refence
     name = sprintf('%s %s %s.set', params.suffix{1}, INFO(subject_idx).ID, params.conditions{c}); 
-    EEG = pop_loadset('filename', name, 'filepath', folder_data);
-    EEG.ref = params.ref;
+    EEG = pop_loadset('filename', name, 'filepath', folder.processed);
+    EEG = pop_reref(EEG, []);
+    EEG.filename = name;
+    EEG.filepath = folder.processed;
     [ALLEEG EEG CURRENTSET] = eeg_store(ALLEEG, EEG, c);
     eeglab redraw  
+    if a == 1 && b == 1
+        INFO(subject_idx).processing(10).process = sprintf('re-referenced to common average');
+        INFO(subject_idx).processing(10).date = sprintf('%s', date);
+    end
     
-    % visualize the average response to identify possible bad channels
-    figure; 
+    % visualize the average response
+    figure(figure_counter); 
     pop_plottopo(pop_select(EEG, 'time', [-0.1 0.3]), [] , '', 0, 'ydir', 1, 'ylim', [-30 30]);
-    sgtitle(sprintf('S%s - %s: original data', subj, condition{c}))
+    sgtitle(sprintf('%s: %s', INFO(subject_idx).ID, params.conditions{c}))
+    set(gcf, 'units', 'normalized', 'outerposition', [0 0 1 1])
+    figure_counter = figure_counter + 1;
     
     % remove bad epochs
     pop_eegplot(EEG, 1, 1, 1);
     waitfor(gcf); 
     EEG = eeg_checkset(EEG);
     
-    % extract information about rejected epoch
-    char_start = 'EEG = pop_rejepoch( EEG, [';
-    char_end = '] ,0)';
-    epochs_start = strfind(EEG.history, char_start) + length(char_start);
-    epochs_end = strfind(EEG.history, char_end) - 1;
-    eval(['discarded.epochs_rejected{c} = [' EEG.history(epochs_start:epochs_end) '];']);
-    discarded.epochs_kept(c) = length(EEG.epoch);
-
-    % update info structure
-    if c == 1
-        INFO(subject_idx).EEG.processing(11).process = sprintf('bad channels discarded');
-        INFO(subject_idx).EEG.processing(11).params.conditions = params.conditions;
-        INFO(subject_idx).EEG.processing(11).suffix = params.suffix{2};
-        INFO(subject_idx).EEG.processing(11).date = sprintf('%s', date);
+    % encode bad epochs to info structure
+    if a == 1 && b == 1
+        INFO(subject_idx).processing(11).process = sprintf('bad trials discarded');
+        INFO(subject_idx).processing(11).params.GUI = 'EEGLAB';
+        INFO(subject_idx).processing(11).date = sprintf('%s', date);
     end
-    INFO(subject_idx).EEG.processing(11).params.discarded(c) = discarded.epochs_rejected(c);
-    INFO(subject_idx).EEG.processing(11).params.kept(c) = discarded.epochs_kept(c);
+    for a = 1:length(ALLCOM)
+        if contains(ALLCOM{a}, 'pop_rejepoch')
+            match = regexp(ALLCOM{a}, '\[(.*?)\]', 'match');
+            if ~isempty(match)
+                discarded = str2num(match{1}(2:end-1)); 
+            else
+                discarded = []; 
+            end
+            break
+        end
+    end
+    INFO(subject_idx).processing(11).params.discarded{c} = discarded;
       
     % save dataset
-    name = sprintf('%s %s %s.set', params.suffix{2}, INFO(subject_idx).ID, params.conditions{c}); 
-    pop_saveset(EEG, 'filename', name, 'filepath', folder_data);
+    pop_saveset(EEG, 'filename', EEG.filename, 'filepath', EEG.filepath);
 end
 
 % apply SSP-SIR individually to each dataset and save the filters
