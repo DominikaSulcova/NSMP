@@ -268,7 +268,7 @@ for d = 1:length(data2import)
     INFO(subject_idx).EEG.dataset(end).name = params.name;  
 
     % import the dataset
-    [dataset.raw(d).header, dataset.raw(d).data, ~] = RLW_import_MEGA(data2import(d).folder, data2import(d).block);
+    [dataset.raw(d).header, dataset.raw(d).data, ~] = RLW_import_MEGA(data2import(d).folder, data2import(d).label);
 
     % rename in the header
     dataset.raw(d).header.name = params.name;
