@@ -280,7 +280,7 @@ addpath(genpath([folder.toolbox '\letswave 7']));
 
 % pre-process continuous data and save for letswave
 fprintf('pre-processing:\n')
-for d = 2:length(dataset.raw)
+for d =1:length(dataset.raw)
     % provide update
     fprintf('--> %s\n', INFO(subject_idx).EEG.dataset(d).name)
 
