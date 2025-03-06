@@ -9,10 +9,10 @@
 % data:     1) raw EEG recordings (NeurOne, Bittium)
 %           --> triggers:   1 - start of a trial
 %                           2 - TMS stimulus onset
-%                           3 - imperative cue (= bridge appears)
 %                           4 - preparatory cue (= ball appears)
+%                           8 - imperative cue (= bridge appears)
 %           2) raw EMG recordings
-%           --> triggers:   1 - TMS stimulus onset
+%           --> triggers:   1 - Start of Trial
 % 
 % script:
 %   - part 1:   runs during the experimental session
