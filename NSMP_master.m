@@ -124,17 +124,18 @@ fprintf('encoding recording info...\n')
 INFO(subject_idx).EEG.SR = str2num(info.recording{1});
 INFO(subject_idx).EEG.ref = info.recording{2};
 INFO(subject_idx).EEG.ground = info.recording{3};
-for t = 1:4
-    INFO(subject_idx).EEG.triggers(t).trigger = t;
-    pattern = sprintf('%d - ([a-zA-Z]+)', t);
-    INFO(subject_idx).EEG.triggers(t).label = regexp(info.recording{4}, pattern, 'tokens', 'once');
+triggers = split(info.recording{4}, ',');
+for t = 1:length(triggers)
+    INFO(subject_idx).EEG.triggers(t).trigger = str2double(regexp(triggers{t}, '\d+\.?\d*', 'match', 'once'));
+    pattern = sprintf('- ([a-zA-Z]+)');
+    INFO(subject_idx).EEG.triggers(t).label = regexp(triggers{t}, pattern, 'tokens', 'once');
 end
 INFO(subject_idx).EEG.blocks = str2num(info.recording{5});
 
 % save and continue
 save(output_file, 'INFO','-append')
 fprintf('done.\n\n')
-clear output_vars info prompt dlgtitle dims definput pattern t
+clear output_vars info prompt dlgtitle dims definput pattern t triggers
 
 %% ====================== PART 2: EEG pre-processing ======================
 % directories
@@ -195,8 +196,58 @@ clear output_vars prompt dlgtitle dims definput input
 params.suffix = {'crop' 'ds' 'dc'};
 params.crop_margin = 5;
 params.downsample = 20;
+params.run_analysis = true;
 % ------------------------- 
 fprintf('section 1: import & pre-process continuous data\n')
+
+% encode session and subject info if necessary
+user_input = input('do you want to encode the session info now? (y/n): ', 's');
+if lower(user_input) == 'y'
+    % input subject & session info
+    prompt = {'subject', 'age:', 'sex:', 'handedness:', 'rMT:', 'session date:', 'session start:'};
+    dlgtitle = 'subject & session information';
+    dims = [1 35];
+    definput = {'S000', '00', 'female/male', 'right/left', '00', sprintf('%s', date), '00:00'};
+    info.session = inputdlg(prompt,dlgtitle,dims,definput);
+
+    % identify subject index
+    subject_idx = str2double(regexp(info.session{1}, '\d+', 'match', 'once'));
+
+    % update info structure
+    fprintf('encoding subject & session info...\n')
+    INFO(subject_idx).ID = info.session{1};
+    INFO(subject_idx).age = str2num(info.session{2});
+    INFO(subject_idx).sex = info.session{3};
+    INFO(subject_idx).handedness = info.session{4};
+    INFO(subject_idx).session.date = info.session{6};
+    INFO(subject_idx).session.start = info.session{7};
+    INFO(subject_idx).TMS.rMT = str2num(info.session{5});
+    INFO(subject_idx).TMS.intensity = ceil(INFO(subject_idx).TMS.rMT * 1.15); 
+
+    % input recording info
+    prompt = {'sampling rate (Hz):', 'reference:', 'ground:', 'triggers:', 'blocks:'};
+    dlgtitle = 'recording information';
+    dims = [1 50];
+    definput = {'20000', 'Fz', 'AFz', '1 - start, 2 - stimulation, 4 - imperative, 8 - preparatory', '1,2,3,4,5'};
+    info.recording = inputdlg(prompt,dlgtitle,dims,definput);
+
+    % update info structure
+    fprintf('encoding recording info...\n')
+    INFO(subject_idx).EEG.SR = str2num(info.recording{1});
+    INFO(subject_idx).EEG.ref = info.recording{2};
+    INFO(subject_idx).EEG.ground = info.recording{3};
+    triggers = split(info.recording{4}, ',');
+    for t = 1:length(triggers)
+        INFO(subject_idx).EEG.triggers(t).trigger = str2double(regexp(triggers{t}, '\d+\.?\d*', 'match', 'once'));
+        pattern = sprintf('- ([a-zA-Z]+)');
+        INFO(subject_idx).EEG.triggers(t).label = regexp(triggers{t}, pattern, 'tokens', 'once');
+    end
+    INFO(subject_idx).EEG.blocks = str2num(info.recording{5});
+
+    % save and continue
+    save(output_file, 'INFO','-append')
+    fprintf('done.\n\n')
+end
 
 % add letswave 6 to the top of search path
 addpath(genpath([folder.toolbox '\letswave 6']));
@@ -213,6 +264,7 @@ end
 params.blocks = INFO(subject_idx).EEG.blocks;
 
 % check if identified subfolders are avaiable 
+fprintf('subject %d (%s): ', subject_idx, INFO(subject_idx).ID)
 data2import = dir(params.folder);
 if ~isempty(data2import)
     % remove all datasets that are not labelled with numbers
@@ -230,10 +282,10 @@ if ~isempty(data2import)
     data2import = data2import(file_idx);
 
     % check for correct labels
-    file_idx = false(1, length(params.blocks));
-    for b = 1:length(params.blocks)
-        for c = 1:length(data2import)
-            if params.blocks(b) == data2import(c).label
+    file_idx = false(1, length(data2import));
+    for b = 1:length(data2import)
+        for c = 1:length(params.blocks)
+            if data2import(b).label == params.blocks(c)
                 file_idx(b) = true;
             end
         end
@@ -275,12 +327,44 @@ for d = 1:length(data2import)
 end  
 fprintf('done.\n')
 
+% check trigger and event nembers, ask for continuation
+for a = 1:length(dataset.raw)
+    % check total number of triggers
+    fprintf('block %d:\n%d triggers found\n', a, length(dataset.raw(a).header.events));
+    
+    % check trigger labels
+    triggers = unique([dataset.raw(a).header.events.code]');
+    fprintf('triggers are labeled: ');
+    for b = 1:length(triggers)
+        fprintf('%s ', triggers(b))
+    end
+    fprintf('\n')
+
+    % check total number of events
+    if ismember('1', triggers)
+        events = 0;
+        for b = 1:length(dataset.raw(a).header.events)
+            if str2double(dataset.raw(a).header.events(b).code) == 1
+                events = events + 1;
+            end
+        end
+    else
+        error('ERROR: no trigger is labeled ''1''! Please check manually.')
+    end
+    fprintf('in total %d events found\n\n', events);
+end
+user_input = input('do you want to continue with the pre-processing? (y/n): ', 's');
+if lower(user_input) == 'n'
+    fprintf('script terminated by user.\n');
+    return; 
+end
+
 % add letswave 7 to the top of search path
 addpath(genpath([folder.toolbox '\letswave 7']));
 
 % pre-process continuous data and save for letswave
 fprintf('pre-processing:\n')
-for d =1:length(dataset.raw)
+for d = 1:length(dataset.raw)
     % provide update
     fprintf('--> %s\n', INFO(subject_idx).EEG.dataset(d).name)
 
@@ -365,7 +449,7 @@ for d =1:length(dataset.raw)
     end
 
     % remove DC + linear detrend continuous data
-    fprintf('removing DC and applying linear detrend...')
+    fprintf('removing DC and applying linear detrend...\n')
     option = struct('linear_detrend', 1, 'suffix', params.suffix{3}, 'is_save', 1);
     lwdata = FLW_dc_removal.get_lwdata(lwdata, option);
     if d == 1
@@ -373,7 +457,7 @@ for d =1:length(dataset.raw)
         INFO(subject_idx).EEG.processing(4).suffix = params.suffix{3};
         INFO(subject_idx).EEG.processing(4).date = sprintf('%s', date);
     end
-    fprintf('done.\n')
+    fprintf('\n')
 
     % update dataset
     dataset.raw(d).header = lwdata.header;
@@ -381,234 +465,295 @@ for d =1:length(dataset.raw)
 end
 fprintf('done.\n')
 
+% run event analysis if required
+if params.run_analysis
+    % initialize logfile
+    fprintf('analysing event delays...\n')
+    filename = sprintf('%s\\logfiles\\event_analysis_%s.txt', folder.output, INFO(subject_idx).ID); 
+    initialize_logfile(INFO, subject_idx, filename);
+
+    % loop through datasets
+    for a = 1:length(dataset.raw)
+        % launch output
+        info = struct;        
+        info.block = str2double(regexp(dataset.raw(a).header.name, 'b(.*)', 'tokens', 'once'));
+    
+        % mark trial starts
+        idx_start = false(1, length(dataset.raw(a).header.events));
+        for b = 1:length(dataset.raw(a).header.events)-2
+            if strcmp(dataset.raw(a).header.events(b).code, 'start')
+                idx_start(b) = true;
+            end
+        end
+        trigger_start = find(idx_start);
+        info.trials = sum(idx_start);
+    
+        % select baseline and delay trials
+        idx_bl = false(1, length(dataset.raw(a).header.events));
+        idx_delay = false(1, length(dataset.raw(a).header.events));
+        for b = 1:length(trigger_start)
+            if b ~= length(trigger_start)
+                trigger_end = trigger_start(b+1) - 1;
+            else
+                trigger_end = length(dataset.raw(a).header.events);
+            end
+            if strcmp(dataset.raw(a).header.events(trigger_start(b) + 1).code, 'stimulation') ...
+                    && strcmp(dataset.raw(a).header.events(trigger_start(b) + 2).code, 'preparatory') ...
+                    && strcmp(dataset.raw(a).header.events(trigger_start(b) + 3).code, 'imperative')
+                idx_bl(trigger_start(b):trigger_end) = true;
+            elseif strcmp(dataset.raw(a).header.events(trigger_start(b) + 1).code, 'preparatory') ...
+                    && strcmp(dataset.raw(a).header.events(trigger_start(b) + 2).code, 'stimulation') ...
+                    && strcmp(dataset.raw(a).header.events(trigger_start(b) + 3).code, 'imperative')
+                idx_delay(trigger_start(b):trigger_end) = true;
+            end
+        end
+    
+        % exract info about baseline trials
+        events.baseline = dataset.raw(a).header.events(idx_bl);
+        idx_bl_start = false(1, length(events.baseline));
+        delay_bl.stimulus = [];
+        delay_bl.preparatory = [];
+        delay_bl.imperative = [];
+        for c = 1:length(events.baseline)
+            if strcmp(events.baseline(c).code, 'start')
+                idx_bl_start(c) = true;
+                delay_bl.stimulus(end + 1) = events.baseline(c + 1).latency - events.baseline(c).latency;
+                delay_bl.preparatory(end + 1) = events.baseline(c + 2).latency - events.baseline(c + 1).latency;
+                if strcmp(events.baseline(c + 3).code, 'imperative')
+                    delay_bl.imperative(end + 1) = events.baseline(c + 3).latency - events.baseline(c + 2).latency;
+                end
+            end
+        end
+        info.baseline.trials = sum(idx_bl_start);
+        info.baseline.delay.stimulus.mean = mean(delay_bl.stimulus);
+        info.baseline.delay.stimulus.min = min(delay_bl.stimulus);
+        info.baseline.delay.stimulus.max = max(delay_bl.stimulus);
+        info.baseline.delay.preparatory.mean = mean(delay_bl.preparatory);
+        info.baseline.delay.preparatory.min = min(delay_bl.preparatory);
+        info.baseline.delay.preparatory.max = max(delay_bl.preparatory);
+        info.baseline.delay.imperative.mean = mean(delay_bl.imperative);
+        info.baseline.delay.imperative.min = min(delay_bl.imperative);
+        info.baseline.delay.imperative.max = max(delay_bl.imperative);
+    
+        % exract info about delay trials
+        events.delay = dataset.raw(a).header.events(idx_delay);
+        idx_delay_start = false(1, length(events.delay));
+        delay_delay.stimulus = [];
+        delay_delay.preparatory = [];
+        delay_delay.imperative = [];
+        for c = 1:length(events.delay)
+            if strcmp(events.delay(c).code, 'start')
+                idx_delay_start(c) = true;
+                delay_delay.preparatory(end + 1) = events.delay(c + 1).latency - events.delay(c).latency;
+                delay_delay.stimulus(end + 1) = events.delay(c + 2).latency - events.delay(c + 1).latency;
+                if strcmp(events.delay(c + 3).code, 'imperative')
+                    delay_delay.imperative(end + 1) = events.delay(c + 3).latency - events.delay(c + 2).latency;
+                end
+            end
+        end
+        info.delay.trials = sum(idx_delay_start);
+        info.delay.delay.preparatory.mean = mean(delay_delay.preparatory);
+        info.delay.delay.preparatory.min = min(delay_delay.preparatory);
+        info.delay.delay.preparatory.max = max(delay_delay.preparatory);
+        info.delay.delay.stimulus.mean = mean(delay_delay.stimulus);
+        info.delay.delay.stimulus.min = min(delay_delay.stimulus);
+        info.delay.delay.stimulus.max = max(delay_delay.stimulus);
+        info.delay.delay.imperative.mean = mean(delay_delay.imperative);
+        info.delay.delay.imperative.min = min(delay_delay.imperative);
+        info.delay.delay.imperative.max = max(delay_delay.imperative);
+    
+        % write to the text file
+        logfile_entry(info, filename)
+    end
+    fprintf('done.\n')
+end
+
 % save and continue
 save(output_file, 'INFO','-append')
-clear a b c d e session_folders session_date data2import data_idx file_idx  prompt dlgtitle dims definput event_idx event_count option lwdata 
+clear a b c d e session_folders session_date data2import data_idx file_idx  prompt dlgtitle dims definput ...
+    triggers events user_input event_idx event_count info option lwdata user_input input filename ...
+    idx_bl idx_delay idx_start info trigger_start events idx_bl_start idx_delay_start delay_bl delay_delay trigger_end 
 fprintf('section 1 finished.\n\n')
 
-%% 2) pre-process TEPs: letswave
+%% 2) pre-process TEPs 
 % ----- section input -----
 params.prefix = 'dc ds crop';
-params.suffix = {'reref' 'dc' 'artifact' 'processed'};
-params.interp_chans = 6;
-params.epoch = [-1.5, 1.5];
+params.conditions = {'baseline' 'delay'};
+params.suffix = {'ep' 'dc' 'art_interp' 'preprocessed'};
+params.eventcode = 'stimulation';
+params.epoch = [-1.5 1.5];
 params.artifact_interp = [-0.005 0.01];
-params.ref = 'averef';
-% -------------------------
-fprintf('section 2: pre-process TEP data\n')
+params.artifact_method = 'pchip';
+% ------------------------- 
+fprintf('section 2: TEP pre-processing\n')
 
 % load dataset if needed
 if exist('dataset') ~= 1
+    fprintf('loading dataset...\n')
     data2load = dir(sprintf('%s*%s*', params.prefix, INFO(subject_idx).ID));
-    if length(data2load) == length(params.conditions) * 2
-        dataset = reload_dataset(data2load, [], 'raw');
-    else
-        error('ERROR: Wrong number of available datasets to load! Check manually.')
-    end
+    dataset = reload_dataset(data2load, [], 'raw');
+    fprintf('done.\n')
 end
 
-% add letswave 7 to the top of search path
-addpath(genpath([folder.toolbox '\letswave 7']));
+% pre-process 
+for d = 1:length(dataset.raw)
+    % provide update
+    fprintf('***** recording block %d *****\n', str2double(regexp(dataset.raw(d).header.name, 'b(.*)', 'tokens', 'once')))
 
-% interpolate channels if needed
-params.labels = {dataset.raw(1).header.chanlocs.labels};
-prompt = {'indicate bad channels that need to be interpolated:'};
-dlgtitle = 'channel interpolation';
-dims = [1 120];
-definput = {strjoin(params.labels,' ')};
-answer = inputdlg(prompt,dlgtitle,dims,definput);
-if ~isempty(answer{1})
-    % identify channels to interpolate
-    chans2interpolate = split(answer{a}, ' ');
-
-    % interpolate identified channels in all datsets
-    for c = 1:length(chans2interpolate)
-        if ~isempty(chans2interpolate{c})
-            % provide update
-            fprintf('interpolating channel %s\n', chans2interpolate{c})
-
-            % indentify the channel to interpolate
-            chan_n = find(strcmp(params.labels, chans2interpolate{c}));
-
-            % calculate distances with other electrodes
-            chan_dist = -ones(length(dataset.raw(1).header.chanlocs), 1);
-            for b = setdiff(1:length(dataset.raw(1).header.chanlocs), chan_n)
-                if dataset.raw(1).header.chanlocs(b).topo_enabled == 1
-                    chan_dist(b) = sqrt((dataset.raw(1).header.chanlocs(b).X - dataset.raw(1).header.chanlocs(chan_n).X)^2 + ...
-                        (dataset.raw(1).header.chanlocs(b).Y - dataset.raw(1).header.chanlocs(chan_n).Y)^2 + ...
-                        (dataset.raw(1).header.chanlocs(b).Z - dataset.raw(1).header.chanlocs(chan_n).Z)^2);
-                end
-            end
-            chan_dist((chan_dist==-1)) = max(chan_dist);
-            [~,chan_idx] = sort(chan_dist);
-
-            % identify neighbouring channels
-            chan_idx = chan_idx(1:params.interp_chans);
-            chans2use = params.labels;
-            chans2use = chans2use(chan_idx);
-
-            % cycle through all datasets
-            for d = 1:length(dataset.raw)
-                % select data
-                lwdata.header = dataset.raw(d).header;
-                lwdata.data = dataset.raw(d).data;
-    
-                % interpolate using the neighboring electrodes
-                option = struct('channel_to_interpolate', chans2interpolate{c}, 'channels_for_interpolation_list', {chans2use}, ...
-                    'suffix', '', 'is_save', 0);
-                lwdata = FLW_interpolate_channel.get_lwdata(lwdata, option);
-    
-                % update dataset
-                dataset.raw(d).header = lwdata.header;
-                dataset.raw(d).data = lwdata.data;  
-            end
-            
-            % encode
-            if c == 1
-                INFO(subject_idx).EEG.processing(5).process = sprintf('bad channels interpolated');
-                INFO(subject_idx).EEG.processing(5).date = sprintf('%s', date);
-            end
-            INFO(subject_idx).EEG.processing(5).params.bad{c} = chans2interpolate{c};
-            INFO(subject_idx).EEG.processing(5).params.chans_used{c} = strjoin(chans2use, ' ');  
+    % mark events of different conditions
+    idx_bl = false(1, length(dataset.raw(d).header.events));
+    idx_delay = false(1, length(dataset.raw(d).header.events));
+    for e = 1:length(dataset.raw(d).header.events) 
+        if strcmp(dataset.raw(d).header.events(e).code, 'start') ...
+                && strcmp(dataset.raw(d).header.events(e + 1).code, 'stimulation') ...
+                && strcmp(dataset.raw(d).header.events(e + 2).code, 'preparatory') ...
+                && strcmp(dataset.raw(d).header.events(e + 3).code, 'imperative')
+            idx_bl(e:e+3) = true;
+        elseif strcmp(dataset.raw(d).header.events(e).code, 'start') ...
+                && strcmp(dataset.raw(d).header.events(e + 1).code, 'preparatory') ...
+                && strcmp(dataset.raw(d).header.events(e + 2).code, 'stimulation') ...
+                && strcmp(dataset.raw(d).header.events(e + 3).code, 'imperative')
+            idx_delay(e:e+3) = true;
         end
     end
-else
-    INFO(subject_idx).EEG.processing(5).process = sprintf('no channels interpolated');
-    INFO(subject_idx).EEG.processing(5).date = sprintf('%s', date);
-end
 
-% input missed channels
-answer;
+    % loop through conditions
+    for c = 1:length(params.conditions)
+        % provide update
+        fprintf('%s condition:\n', params.conditions{c})
 
-% re-label 'stimulation' events according to conditions
-fprintf('assigning condition labels to events: block ')
-
-% epoch and sort into conditions
-fprintf('pre-processing:\n')
-for d = 1:length(dataset.raw)
-    fprintf('block %d:\n', d)
-
-    % select data
-    lwdata.header = dataset.raw(d).header;
-    lwdata.data = dataset.raw(d).data;
-
-    % re-reference to common average
-    fprintf('re-referencing...')
-    option = struct('reference_list', {params.labels}, 'apply_list', {params.labels}, 'suffix', params.suffix{1}, 'is_save', 0);
-    lwdata = FLW_rereference.get_lwdata(lwdata, option);
-    if d == 1
-        INFO(subject_idx).EEG.processing(6).process = sprintf('re-referenced to common average');
-        INFO(subject_idx).EEG.processing(6).suffix = params.suffix{1};
-        INFO(subject_idx).EEG.processing(6).date = sprintf('%s', date);
-    end
-
-    % epoch per condition
-    fprintf('epoching ... ')
-    lwdata_orig = lwdata;
-    for c = 1:length(params.conditions) 
         % add letswave 7 to the top of search path
         addpath(genpath([folder.toolbox '\letswave 7']));
 
-        % subset the data of this condition and epoch
-        lwdata = lwdata_orig;
-        option = struct('event_labels', params.conditions{c}, 'x_start', params.epoch(1), 'x_end', params.epoch(2), ...
-            'x_duration', params.epoch(2)-params.epoch(1), 'suffix', sprints('%s b%d', params.conditions{c}, d), 'is_save', 0);
-        lwdata = FLW_segmentation.get_lwdata(lwdata, option);
-        if d == 1 && c == 1
-            INFO(subject_idx).EEG.processing(7).process = sprintf('segmented to TEP epochs');
-            INFO(subject_idx).EEG.processing(7).params.limits = params.epoch;
-            INFO(subject_idx).EEG.processing(7).suffix = params.conditions;
-            INFO(subject_idx).EEG.processing(7).date = sprintf('%s', date);
+        % subset data
+        lwdata.header = dataset.raw(d).header;
+        lwdata.data = dataset.raw(d).data; 
+        if c == 1
+            lwdata.header.events = lwdata.header.events(idx_bl);
+        elseif c == 2
+            lwdata.header.events = lwdata.header.events(idx_delay);
         end
 
-        % remove DC + linear detrend epoch data
-        fprintf('removing DC and applying linear detrend...')
-        option = struct('linear_detrend', 1, 'suffix', params.suffix{2}, 'is_save', 0);
-        lwdata = FLW_dc_removal.get_lwdata(lwdata, option);
+        % segment
+        fprintf('segmenting ...\n')
+        option = struct('event_labels', params.eventcode, 'x_start', params.epoch(1), 'x_end', params.epoch(2), ...
+            'x_duration', params.epoch(2)-params.epoch(1), 'suffix', params.suffix{1}, 'is_save', 0);
+        lwdata = FLW_segmentation.get_lwdata(lwdata, option);
         if d == 1 && c == 1
-            INFO(subject_idx).EEG.processing(8).process = sprintf('DC + linear detrend on epoched data');
-            INFO(subject_idx).EEG.processing(8).suffix = params.suffix{2};
-            INFO(subject_idx).EEG.processing(8).date = sprintf('%s', date);
+            INFO(subject_idx).EEG.processing(5).process = 'segmented to epochs';
+            INFO(subject_idx).EEG.processing(5).params.limits = params.epoch;
+            INFO(subject_idx).EEG.processing(5).suffix = params.suffix{1};
+            INFO(subject_idx).EEG.processing(5).date = sprintf('%s', date);
         end
 
         % add letswave 6 to the top of search path
         addpath(genpath([folder.toolbox '\letswave 6']));
 
-        % interpolate around TMS stimulus
-        fprintf('interpolating TMS artifact...')
-        [lwdata.header, lwdata.data, ~] = RLW_suppress_artifact_event(lwdata.header, lwdata.data, ...
+        % interpolate TMS artifact
+        fprintf('interpolating TMS artifact...\n')
+        header = lwdata.header;
+        data = lwdata.data;
+        [header, data, ~] = RLW_suppress_artifact_event(header, data, ...
             'xstart', params.artifact_interp(1), 'xend', params.artifact_interp(2), ...
-            'event_code', params.conditions{c}, 'interp_method', 'pchip'); 
-        lwdata.header.name = [params.suffix{3} ' ' lwdata.header.name];
+            'event_code', params.eventcode, 'interp_method', params.artifact_method); 
+        header.name = [params.suffix{3} ' ' header.name];
         if d == 1 && c == 1
-            INFO(subject_idx).EEG.processing(9).process = sprintf('TMS artifact interpolated');
-            INFO(subject_idx).EEG.processing(9).params.limits = params.artifact_interp;
-            INFO(subject_idx).EEG.processing(9).params.method = 'pchip';
-            INFO(subject_idx).EEG.processing(9).suffix = params.suffix{3};
-            INFO(subject_idx).EEG.processing(9).date = sprintf('%s', date);
+            INFO(subject_idx).EEG.processing(6).process = 'TMS artifact interpolated';
+            INFO(subject_idx).EEG.processing(6).params.limits = params.artifact_interp;
+            INFO(subject_idx).EEG.processing(6).params.method = params.artifact_method;
+            INFO(subject_idx).EEG.processing(6).suffix = params.suffix{3};
+            INFO(subject_idx).EEG.processing(6).date = sprintf('%s', date);
         end
 
-        % update in the dataset
-        dataset.epoched((d - 1)*length(dataset.raw) + c).condition = params.conditions{c};
-        dataset.epoched((d - 1)*length(dataset.raw) + c).header = lwdata.header;
-        dataset.epoched((d - 1)*length(dataset.raw) + c).data = lwdata.data; 
-        fprintf('done.\n')
-    end
-end
+        % remove DC + linear detrend
+        fprintf('DC + linear detrend ...\n')
+        [header, data, ~]=RLW_dc_removal(header, data, 'linear_detrend', 1);
+        if d == 1 && c == 1
+            INFO(subject_idx).EEG.processing(7).process = 'DC + linear detrend on epoched data';
+            INFO(subject_idx).EEG.processing(7).suffix = params.suffix{2};
+            INFO(subject_idx).EEG.processing(7).date = sprintf('%s', date);
+        end
 
-% concatenate datasets per condition & save for letswave
+        % usave to temporary structure
+        blocks_preprocessed((d-1)*length(params.conditions) + c).condition = params.conditions{c}; 
+        blocks_preprocessed((d-1)*length(params.conditions) + c).header = header;
+        blocks_preprocessed((d-1)*length(params.conditions) + c).data = data; 
+    end 
+end
+fprintf('done.\n\n')
+
+% concatenate by condition
+fprintf('concatenating epochs by condition, saving...\n')
 for c = 1:length(params.conditions)
-    % select data from all matching datasets
-    dataset.conditions(c).condition = params.conditions{c};
-    dataset.conditions(c).header = 0;
-    for d = 1:length(dataset.epoched)
-        if strcmp(dataset.epoched(d).condition{1}, params.conditions{c})
-            if dataset.conditions(c).header == 0
-                dataset.conditions(c).header = dataset.epoched(d).header;
-                dataset.conditions(c).data = dataset.epoched(d).data;
+    % identify datasets to concatenate
+    idx = false(1, length(blocks_preprocessed));
+    for b = 1:length(blocks_preprocessed)
+        if strcmp(blocks_preprocessed(b).condition, params.conditions{c})
+            idx(b) = true;
+        end
+    end
+
+    % concatenate epochs
+    for b = 1:length(blocks_preprocessed)
+        if idx(b)
+            if ~exist('subset')
+                subset.header = blocks_preprocessed(b).header;
+                subset.data = blocks_preprocessed(b).data;
             else
-                dataset.conditions(c).data = cat(1, dataset.conditions(c).data, dataset.epoched(d).data);
+                subset.data = cat(1, subset.data, blocks_preprocessed(b).data);
+                subset.header.events(end + 1 : end + length(blocks_preprocessed(b).header.events)) = blocks_preprocessed(b).header.events;
             end
         end
     end
 
     % adjust header
-    dataset.conditions(c).header.name = dataset.conditions(c).header.name(1:end-3);
-    dataset.conditions(c).header.datasize = size(dataset.conditions(c).data);
+    subset.header.name = sprintf('%s %s %s %s', params.suffix{4}, study, INFO(subject_idx).ID, params.conditions{c}); 
+    subset.header.datasize = size(subset.data);
+    triggers_n = length(subset.header.events) / subset.header.datasize(1);
+    event_counter = 1;
+    for e = 1:triggers_n:length(subset.header.events)
+        for a = 1:triggers_n
+            subset.header.events(e - 1 + a).epoch = event_counter;
+        end
+        event_counter = event_counter + 1;
+    end
 
-    % save
-    header = dataset.conditions(c).header;
-    save([dataset.conditions(c).header.name '.lw6'], 'header')
-    data = dataset.conditions(c).data;
-    save([dataset.conditions(c).header.name '.mat'], 'data')
+    % save for letswave
+    data = subset.data;
+    header = subset.header;
+    save(sprintf('%s.lw6', header.name), 'header')
+    save(sprintf('%s.mat', header.name), 'data') 
+    clear subset
+
+    % encode
+    if c == 1
+        INFO(subject_idx).EEG.processing(8).process = sprintf('epochs concatenated by condition');
+        INFO(subject_idx).EEG.processing(8).date = sprintf('%s', date);
+    end
+    INFO(subject_idx).EEG.processing(8).params(c).condition = params.conditions{c};
+    INFO(subject_idx).EEG.processing(8).params(c).epochs = header.datasize(1);
+    INFO(subject_idx).EEG.processing(8).suffix{c} = params.conditions{c};    
 end
-
-% add letswave 7 to the top of search path
-addpath(genpath([folder_toolbox '\letswave7-master']));
-
-% export in .set format for EEGLAB
-fprintf('exporting for EEGLAB:\n')
-for c = 1:length(params.conditions)
-    fprintf('%s dataset ... ', params.conditions{c})
-    
-    % select data
-    lwdata.header = dataset.conditions(c).header;
-    lwdata.data = dataset.conditions(c).data;    
-    
-    % export 
-    name = sprintf('%s %s %s', params.suffix{4}, INFO(subject_idx).ID, params.conditions{c});
-    export_EEGLAB(lwdata, name, INFO(subject_idx).ID);
-end
-INFO(subject_idx).EEG.processing(10).process = sprintf('data exported for EEGLAB');
-INFO(subject_idx).EEG.processing(10).params.format = '.set';
-INFO(subject_idx).EEG.processing(10).suffix = params.suffix{4};
-INFO(subject_idx).EEG.processing(10).date = sprintf('%s', date);
 fprintf('done.\n')
+
+% open letswave for visual check
+fig_all = findall(0, 'Type', 'figure');
+open = true;
+for f = 1:length(fig_all)
+    if contains(get(fig_all(f), 'Name'), 'Letswave', 'IgnoreCase', true)
+        open = false;
+        break;
+    end
+end
+if open
+    letswave
+end
+fprintf('\n')
 
 % save and continue
 save(output_file, 'INFO','-append')
-clear params c d prompt dlgtitle dims definput answer chans2interpolate chan_n chan_dist chan_idx chans2use ...
-    lwdata data header name
+clear a b c d e f data2load lwdata option idx idx_bl idx_delay header data blocks_preprocessed ...
+    subset event_counter triggers_n fig_all open
 fprintf('section 2 finished.\n\n')
 
 %% 3) pre-process TEPs: EEGLAB
@@ -1201,4 +1346,35 @@ for i = 1:size(EEG_in.data,3)
 
     EEG_out.data(:,:,i) = data_correct;
 end
+end
+function initialize_logfile(INFO, subject_idx, filename)
+fileID = fopen(filename, 'w');
+fprintf(fileID, sprintf('********** EVENT ANALYSIS **********\r\n')); 
+fprintf(fileID, sprintf('subject: %s\r\n', INFO(subject_idx).ID));
+fprintf(fileID, sprintf('date of experiment: %s\r\n', INFO(subject_idx).session.date));
+fprintf(fileID, '\r\n');
+fclose(fileID);
+end
+function logfile_entry(info, filename)
+fileID = fopen(filename, 'a');
+fprintf(fileID, sprintf('*** recording block %d ***\r\n', info.block));
+fprintf(fileID, sprintf('trials in total: %d\r\n', info.trials));
+fprintf(fileID, '\r\n');
+fprintf(fileID, sprintf('baseline trials %d:\r\n', info.baseline.trials));
+fprintf(fileID, sprintf('     - mean delay from start to stimulus: %ds (min: %ds; max: %ds)\r\n', ...
+    info.baseline.delay.stimulus.mean, info.baseline.delay.stimulus.min, info.baseline.delay.stimulus.max));
+fprintf(fileID, sprintf('     - mean delay from stimulus to preparatory cue: %ds (min: %ds; max: %ds)\r\n', ...
+    info.baseline.delay.preparatory.mean, info.baseline.delay.preparatory.min, info.baseline.delay.preparatory.max));
+fprintf(fileID, sprintf('     - mean delay from preparatory cue to imperative cue: %ds (min: %ds; max: %ds)\r\n', ...
+    info.baseline.delay.imperative.mean, info.baseline.delay.imperative.min, info.baseline.delay.imperative.max));
+fprintf(fileID, '\r\n');
+fprintf(fileID, sprintf('delay trials %d:\r\n', info.delay.trials));
+fprintf(fileID, sprintf('     - mean delay from start to preparatory cue: %ds (min: %ds; max: %ds)\r\n', ...
+    info.delay.delay.preparatory.mean, info.delay.delay.preparatory.min, info.delay.delay.preparatory.max));
+fprintf(fileID, sprintf('     - mean delay from preparatory cue to stimulus: %ds (min: %ds; max: %ds)\r\n', ...
+    info.delay.delay.stimulus.mean, info.delay.delay.stimulus.min, info.delay.delay.stimulus.max));
+fprintf(fileID, sprintf('     - mean delay from stimulus to imperative cue: %ds (min: %ds; max: %ds)\r\n', ...
+    info.delay.delay.imperative.mean, info.delay.delay.imperative.min, info.delay.delay.imperative.max));
+fprintf(fileID, '\r\n');
+fclose(fileID);
 end
