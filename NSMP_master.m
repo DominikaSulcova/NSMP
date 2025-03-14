@@ -19,42 +19,41 @@
 %               encodes subject & session information
 % 
 %   - part 2:   processing of single-subject EEG data 
-%               1) data import              
-%                   - loads raw data from the subject folder --> dataset
-%                   - crops close to trials
-%                   - downsamples
-%                   - DC + linear detrend on continuous data
-%                   - saves for letswave
-%               2) pre-process TEPs: letswave
-%                   - interpolates channels if necessary
-%                   - inputs missed trials
-%                   - re-labels 'stimulation' events according to conditions
-%                   - re-references to common average
-%                   - epochs around TMS stimulus 
-%                   - DC + linear detrend per epoch
-%                   - removes TMS artifact via cubic interpolation 
-%                   - concatenates datasets per condition
-%                   - exports for EEGLAB
-%               3) pre-process TEPs: EEGLAB
-%                   - checks for bad trials
-%                   - removes muscular artifact using SSP-SIR
-%                   - corrects for baseline
-%                   - quality check --> plots figure & saves
-%                   - saves for letswave
-%               4) pre-process pre-stimulus data
-%                   - applies bandpass frequency filter
-%                   - selects epochs from the pre-stimulus interval 
-%                   - saves for letswave 
-%               5) ICA
-%                   - calculates ICA matrix for all datasets together
-%                   - encodes discarded ICs
-%                   - saves for letswave
-%               6) extract TEP measures
-%                   - calculates average TEP GFP and identifies peaks
-%                   - plots average TEP with peak topographies
-%                   - ...
-%               7) extract beta measures 
-%                   - ...
+%               1) import & pre-process continuous data
+%                       - assign electrode coordinates
+%                       - check and re-label events
+%                       - crop continuous data and save for future analysis
+%                       - downsample by indicated ratio (default 20)
+%                       - remove DC + linear detrend
+%                       - optionally runs the analysis of trigger latencies
+%               --> pre-processed data saved in a structure 'dataset'
+%               2) pre-process TEPs 
+%                       - segmented relative to TMS events (default [-1.5 1.5]s)
+%                       - remove DC + linear detrend on single epochs
+%                       - interpolate TMS artifact (cubic interpolation, default [-5 10]ms)
+%                       - concatenate blocks by condition, save for letswave
+%               ==> at this point, data should be visually inspected to
+%               identify bad channels
+%               3) export to EEGLAB
+%                       - interpolate channels if needed (default 6 neighbor channels)
+%                       - save as .set
+%               4) SSP-SIR - removal of the muscular artifact 
+%                       - re-reference to common average
+%                       - apply SSP-SIR on merged data (spherical model) 
+%                       - apply frequency filters - Hamming windowed sinc FIR filter
+%                       (default bandpass [0.5 80]Hz, notch [48.5, 51.5]Hz)
+%                       - save for letswave, plot output of filtering
+%               ==> at this point, data should be visually inspected and bad trials
+%               manually discarded (implemented in letswave 6)
+%               5) ICA - removal of remaining artifacts 
+%                       - load dataset with bad trials removed, encode 
+%                       - compute ICA matrix, save for letswave
+%                       - plot IC topographies and spectral content
+%               ==> at this point, ICA should be conducted and artifactual ICs
+%               manually discarded based on topography, timecourse, spectral content 
+%               and MARA labelling (implemented in letswave 6)
+%                       - encode and classify discarded ICs
+%                       - extract and plot mean signal at electrode of interest
 % 
 %   - part 3:   processing of single-subject EMG data 
 %               1) ...
@@ -116,7 +115,7 @@ INFO(subject_idx).TMS.intensity = ceil(INFO(subject_idx).TMS.rMT * 1.15);
 prompt = {'sampling rate (Hz):', 'reference:', 'ground:', 'triggers:', 'blocks:'};
 dlgtitle = 'recording information';
 dims = [1 50];
-definput = {'20000', 'Fz', 'AFz', '1 - start, 2 - stimulation, 4 - imperative, 8 - preparatory', '1,2,3,4,5'};
+definput = {'20000', 'FCz', 'AFz', '1 - start, 2 - stimulation, 4 - preparatory, 8 - imperative', '1,2,3,4,5'};
 info.recording = inputdlg(prompt,dlgtitle,dims,definput);
 
 % update info structure
@@ -228,7 +227,7 @@ if lower(user_input) == 'y'
     prompt = {'sampling rate (Hz):', 'reference:', 'ground:', 'triggers:', 'blocks:'};
     dlgtitle = 'recording information';
     dims = [1 50];
-    definput = {'20000', 'Fz', 'AFz', '1 - start, 2 - stimulation, 4 - imperative, 8 - preparatory', '1,2,3,4,5'};
+    definput = {'20000', 'Fz', 'AFz', '1 - start, 2 - stimulation, 4 - preparatory, 8 - imperative', '1,2,3,4,5'};
     info.recording = inputdlg(prompt,dlgtitle,dims,definput);
 
     % update info structure
@@ -718,6 +717,11 @@ for c = 1:length(params.conditions)
         event_counter = event_counter + 1;
     end
 
+    % save to the dataset
+    dataset.preprocessed(c).condition = params.conditions{c};
+    dataset.preprocessed(c).header = subset.header;
+    dataset.preprocessed(c).data = subset.data;
+
     % save for letswave
     data = subset.data;
     header = subset.header;
@@ -756,233 +760,553 @@ clear a b c d e f data2load lwdata option idx idx_bl idx_delay header data block
     subset event_counter triggers_n fig_all open
 fprintf('section 2 finished.\n\n')
 
-%% 3) pre-process TEPs: EEGLAB
+%% 3) interpolate bad chanels, export to EEGLAB
 % ----- section input -----
-params.conditions = {'' ''};
-params.suffix = {'processed' 'checked' 'sspsir_1' 'sspsir_2'};
-params.baseline = [-0.25 -0.006]; 
-params.time_range = [-0.006, 0.050];
-% params.time_range = time_range/1000;              % uncomment this if the filter is not applied to appropriate time interval 
-params.lwsave = true;                               % --> in that case a following change must be made in tesa_spssir function  
-% -------------------------                         % in the calculation of the smoothening function:   if [timeRange(tidx,2) - timeRange(tidx,1)] < 1
-fprintf('section 3: TEP pre-processing - EEGLAB\n')                                                     %   smoothLength = smoothLength / 1000;
-                                                                                                        % end
+params.prefix = 'preprocessed';
+params.conditions = {'baseline' 'delay'};
+params.interp_chans = 6;
+% -------------------------
+fprintf('section 3: exporting to EEGLAB\n')
+
+% load dataset if needed
+if exist('dataset') ~= 1
+    fprintf('loading dataset...\n')
+    data2load = dir(sprintf('%s*%s*', params.prefix, INFO(subject_idx).ID));
+    dataset = reload_dataset(data2load, [], 'preprocessed');
+    fprintf('done.\n')
+end
+
+% interpolate channels if needed
+params.labels = {dataset.preprocessed(1).header.chanlocs.labels};
+prompt = {'channel(s) to interpolate:'};
+definput = {strjoin(params.labels, ' ')};
+dlgtitle = 'channel interpolation';
+dims = [1 220];
+answer = inputdlg(prompt,dlgtitle,dims,definput);
+for a = 1:length(answer)
+    if ~isempty(answer{a})
+        % identify channels to interpolate
+        chans2interpolate = split(answer{a}, ' ');
+    
+        % interpolate identified channels in all datsets
+        for c = 1:length(chans2interpolate)
+            if ~isempty(chans2interpolate{c})
+                % provide update
+                fprintf('interpolating channel %s\n', chans2interpolate{c})
+    
+                % indentify the channel to interpolate
+                chan_n = find(strcmp(params.labels, chans2interpolate{c}));
+    
+                % calculate distances with other electrodes
+                chan_dist = -ones(length(dataset.preprocessed(1).header.chanlocs), 1);
+                for b = setdiff(1:chan_n, chan_n)
+                    if dataset.preprocessed(1).header.chanlocs(b).topo_enabled == 1
+                        chan_dist(b) = sqrt((dataset.preprocessed(1).header.chanlocs(b).X - dataset.preprocessed(1).header.chanlocs(chan_n).X)^2 + ...
+                            (dataset.preprocessed(1).header.chanlocs(b).Y - dataset.preprocessed(1).header.chanlocs(chan_n).Y)^2 + ...
+                            (dataset.preprocessed(1).header.chanlocs(b).Z - dataset.preprocessed(1).header.chanlocs(chan_n).Z)^2);
+                    end
+                end
+                chan_dist((chan_dist==-1)) = max(chan_dist);
+                [~,chan_idx] = sort(chan_dist);
+    
+                % identify neighbouring channels
+                chan_idx = chan_idx(1:params.interp_chans);
+                chans2use = params.labels;
+                chans2use = chans2use(chan_idx);
+    
+                % cycle through all datasets
+                for d = 1:length(dataset.preprocessed)
+                    % select data
+                    lwdata.header = dataset.preprocessed(d).header;
+                    lwdata.data = dataset.preprocessed(d).data;
+        
+                    % interpolate using the neighboring electrodes
+                    option = struct('channel_to_interpolate', chans2interpolate{c}, 'channels_for_interpolation_list', {chans2use}, ...
+                        'suffix', '', 'is_save', 0);
+                    lwdata = FLW_interpolate_channel.get_lwdata(lwdata, option);
+        
+                    % update dataset
+                    dataset.preprocessed(d).header = lwdata.header;
+                    dataset.preprocessed(d).data = lwdata.data;  
+                end
+                
+                % encode
+                if c == 1
+                    INFO(subject_idx).EEG.processing(9).process = sprintf('bad channels interpolated');
+                    INFO(subject_idx).EEG.processing(9).date = sprintf('%s', date);
+                end
+                INFO(subject_idx).EEG.processing(9).params.bad{c} = chans2interpolate{c};
+                INFO(subject_idx).EEG.processing(9).params.chans_used{c} = strjoin(chans2use, ' ');  
+            end
+        end
+    else
+        INFO(subject_idx).EEG.processing(9).process = sprintf('no channels interpolated');
+        INFO(subject_idx).EEG.processing(9).date = sprintf('%s', date);
+    end
+end
+
+% add letswave 7 to the top of search path
+addpath(genpath([folder.toolbox '\letswave 7']));
+
+% save as .set
+fprintf('saving for EEGLAB... ')
+for d = 1:length(dataset.preprocessed)
+    fprintf('. ')
+
+    % select data
+    lwdata.header = dataset.preprocessed(d).header;
+    lwdata.data = dataset.preprocessed(d).data;
+
+    % export 
+    export_EEGLAB(lwdata, lwdata.header.name, INFO(subject_idx).ID);
+end
+fprintf('done.\n\n')
+
+% save and continue
+save(output_file, 'INFO','-append')
+clear a b c d e prompt dlgtitle dims definput answer chans2interpolate chan_n chan_dist chan_idx chans2use lwdata option 
+fprintf('section 3 finished.\n\n')
+
+%% 4) SSP-SIR
+% ----- section input -----
+params.prefix = 'preprocessed';
+params.suffix = {'preprocessed' 'sspsir' 'ffilt'};
+params.conditions = {'baseline' 'delay'};
+params.baseline = [-0.3 -0.006]; 
+params.bandpass = [0.5, 80];
+params.notch = [48.5, 51.5];
+params.plot_output = true;
+params.plot_toi = [-0.1 0.5];
+params.plot_eoi = 'C3';
+% -------------------------
+fprintf('section 4: SSP-SIR\n')
+
 % add eeglab to the top of search path and launch
 addpath(fullfile(folder.toolbox, 'EEGLAB'));
-eeglab 
+eeglab
+
+% load all datasets, re-reference 
+fprintf('loading dataset: ')
+for a = 1:length(dataset.preprocessed)
+    fprintf('. ')
+    % load dataset, re-reference  
+    name = sprintf('%s %s %s %s.set', params.suffix{1}, study, INFO(subject_idx).ID, params.conditions{a}); 
+    EEG = pop_loadset('filename', name, 'filepath', folder.processed);
+    EEG.filename = name;
+    EEG.filepath = folder.processed;
+    EEG = pop_reref(EEG, []);
+    [ALLEEG EEG CURRENTSET] = eeg_store(ALLEEG, EEG, a);
+    eeglab redraw  
+    if a == 1 
+        INFO(subject_idx).EEG.processing(10).process = 're-referenced to common average';
+        INFO(subject_idx).EEG.processing(10).date = sprintf('%s', date);
+    end
+end
+fprintf('done.\n')
+
+% merge the data
+fprintf('merging ...\n')
+merged_EEG = pop_mergeset(ALLEEG, 1:length(ALLEEG), 0);
+
+% apply SSP-SIR - spherical model 
+fprintf('applying SSP-SIR ...\n')
+merged_EEG = pop_tesa_sspsir(merged_EEG, 'artScale', 'automatic', 'PC', []);
+prompt = {'number of rejected PCs:'};
+dlgtitle = 'SSP-SIR';
+dims = [1 40];
+definput = {''};
+input = inputdlg(prompt,dlgtitle,dims,definput);
+
+% encode 
+INFO(subject_idx).EEG.processing(11).process = 'muscular artifact removed using SSP-SIR';
+INFO(subject_idx).EEG.processing(11).params.method = 'SSP-SIR';
+INFO(subject_idx).EEG.processing(11).params.leadfield = 'default spherical';
+INFO(subject_idx).EEG.processing(11).params.PC_removed = str2num(input{1,1});
+INFO(subject_idx).EEG.processing(11).suffix = params.suffix{2};
+INFO(subject_idx).EEG.processing(11).date = sprintf('%s', date);
+
+% split back to original datasets
+idx_start = 1;
+for b = 1:length(dataset.preprocessed)
+    % identify number of epochs 
+    n_epochs = ALLEEG(b).trials;
+
+    % extract epochs and update ALLEEG
+    EEG = pop_select(merged_EEG, 'trial', idx_start:(idx_start + n_epochs - 1));
+
+    % save new dataset
+    name = sprintf('%s %s %s %s', params.suffix{2}, study, INFO(subject_idx).ID, params.conditions{b}); 
+    EEG.setname = name;
+    EEG.filename = sprintf('%s.set', name);
+    pop_saveset(EEG, 'filename', name, 'filepath', folder.processed);
+
+    % update starting index 
+    idx_start = idx_start + n_epochs;       
+end
+    
+% apply frequency filters and save
+fprintf('applying frequency filters: \n')
+for b = 1:length(dataset.preprocessed)
+    fprintf('. ')
+
+    % load dataset
+    name = sprintf('%s %s %s %s.set', params.suffix{2}, study, INFO(subject_idx).ID, params.conditions{b}); 
+    EEG = pop_loadset('filename', name, 'filepath', folder.processed);
+    [ALLEEG, EEG, b] = eeg_store(ALLEEG, EEG, b);
+    eeglab redraw 
+
+    % bandpass filter
+    EEG = pop_eegfiltnew(EEG, 'locutoff', params.bandpass(1), 'hicutoff', params.bandpass(2));
+
+    % notch filter
+    EEG = pop_eegfiltnew(EEG, 'locutoff', params.notch(1), 'hicutoff', params.notch(2), 'revfilt', 1);
+
+    % % check spectrum
+    % pop_spectopo(EEG, 1, [], 'EEG', 'freqrange', [0 100]);
+
+    % encode to info structure
+    if b == 1
+        INFO(subject_idx).EEG.processing(12).process = sprintf('frequency filters applied');
+        INFO(subject_idx).EEG.processing(12).params.bandpass = params.bandpass;
+        INFO(subject_idx).EEG.processing(12).params.notch = params.notch;
+        INFO(subject_idx).EEG.processing(12).suffix = params.suffix{3};
+        INFO(subject_idx).EEG.processing(12).date = sprintf('%s', date);
+    end
+
+    % update dataset and save for letswave
+    name = sprintf('%s %s %s %s %s', params.suffix{3}, params.suffix{2},...
+        study, INFO(subject_idx).ID, params.conditions{b}); 
+    lwdata = export_lw(EEG, dataset.preprocessed(b).header, name);
+    dataset.sspsir(b).header = lwdata.header;
+    dataset.sspsir(b).data = lwdata.data;
+    header = lwdata.header;
+    data = lwdata.data;
+    save([name '.lw6'], 'header')
+    save([name '.mat'], 'data')
+    fprintf('\n')
+end
 
 % update figure counter
 fig_all = findall(0, 'Type', 'figure');
 figure_counter = length(fig_all) + 1;
 
-% remove bad epochs
-fprintf('removing bad epochs:\n')
-for c = 1:length(params.conditions)
-    fprintf('%s dataset ...', params.conditions{c})
+% plot the output figure
+if params.plot_output
+    % define common visual parameters
+    params.labels = {dataset.sspsir(1).header.chanlocs.labels};
+    visual.x = dataset.sspsir(1).header.xstart : dataset.sspsir(1).header.xstep : ...
+        dataset.sspsir(1).header.xstep * dataset.sspsir(1).header.datasize(6) + dataset.sspsir(1).header.xstart - dataset.sspsir(1).header.xstep;
+    visual.labels = {'original', 'filtered'};
+    visual.xlim = params.plot_toi;
+    visual.colors = [0.3333    0.4471    0.9020;
+                    1.0000    0.0745    0.6510];
+    visual.eoi  = find(strcmp(params.labels, params.plot_eoi));
 
-    % load the dataset, re-refence
-    name = sprintf('%s %s %s.set', params.suffix{1}, INFO(subject_idx).ID, params.conditions{c}); 
-    EEG = pop_loadset('filename', name, 'filepath', folder.processed);
-    EEG = pop_reref(EEG, []);
-    EEG.filename = name;
-    EEG.filepath = folder.processed;
-    [ALLEEG EEG CURRENTSET] = eeg_store(ALLEEG, EEG, c);
-    eeglab redraw  
-    if a == 1 && b == 1
-        INFO(subject_idx).processing(10).process = sprintf('re-referenced to common average');
-        INFO(subject_idx).processing(10).date = sprintf('%s', date);
-    end
-    
-    % visualize the average response
-    figure(figure_counter); 
-    pop_plottopo(pop_select(EEG, 'time', [-0.1 0.3]), [] , '', 0, 'ydir', 1, 'ylim', [-30 30]);
-    sgtitle(sprintf('%s: %s', INFO(subject_idx).ID, params.conditions{c}))
-    set(gcf, 'units', 'normalized', 'outerposition', [0 0 1 1])
-    figure_counter = figure_counter + 1;
-    
-    % remove bad epochs
-    pop_eegplot(EEG, 1, 1, 1);
-    waitfor(gcf); 
-    EEG = eeg_checkset(EEG);
-    
-    % encode bad epochs to info structure
-    if a == 1 && b == 1
-        INFO(subject_idx).processing(11).process = sprintf('bad trials discarded');
-        INFO(subject_idx).processing(11).params.GUI = 'EEGLAB';
-        INFO(subject_idx).processing(11).date = sprintf('%s', date);
-    end
-    for a = 1:length(ALLCOM)
-        if contains(ALLCOM{a}, 'pop_rejepoch')
-            match = regexp(ALLCOM{a}, '\[(.*?)\]', 'match');
-            if ~isempty(match)
-                discarded = str2num(match{1}(2:end-1)); 
-            else
-                discarded = []; 
-            end
-            break
-        end
-    end
-    INFO(subject_idx).processing(11).params.discarded{c} = discarded;
-      
-    % save dataset
-    pop_saveset(EEG, 'filename', EEG.filename, 'filepath', EEG.filepath);
-end
+    % launch the figure
+    fig = figure(figure_counter);
+    set(fig, 'units', 'normalized', 'outerposition', [0 0 1 1])
+    hold on
 
-% apply SSP-SIR individually to each dataset and save the filters
-fprintf('applying SSP-SIR to the original dataset:\n')
-for c = 1:length(params.conditions)
-    fprintf('%s dataset ...', params.conditions{c})
+    % plot data
+    for a = 1:length(params.conditions)
+        % define t value
+        visual.t_value = tinv(0.975, size(dataset.sspsir(a).data, 1) - 1); 
 
-    % select the dataset
-    EEG = ALLEEG(c);
-    [ALLEEG EEG CURRENTSET] = eeg_store(ALLEEG, EEG, c);
-    eeglab redraw
-        
-    % visual check - before SSP-SIR
-    figure; 
-    pop_timtopo(EEG, [-50  150], [5  15  30  45  60  100]);
-    sgtitle(sprintf('%s - %s: original data', INFO(subject_idx).ID, params.conditions{c}))
-    figure_name = sprintf('TEP no_filter %s %s', INFO(subject_idx).ID, params.conditions{c}); 
-    savefig(sprintf('%s\\figures\\%s.fig', folder.output, figure_name))
-    saveas(gcf, sprintf('%s\\figures\\%s.svg', folder.output, figure_name))
-
-    % ask if the original ssp filter should be applied
-    answer{counter} = questdlg('Do you want to apply original SSP-SIR', 'SSP-SIR', 'YES', 'NO', 'YES'); 
-
-    % SSP-SIR - spherical model 
-    [EEG, EEG_old] = pop_tesa_sspsir(EEG, 'artScale', 'manual', 'timeRange', time_range, 'PC', []);
-    switch answer{counter}
-        case 'YES'
-            clear EEG_old
-        case 'NO'
-            EEG = EEG_old;
-            clear EEG_old
-    end  
-
-    % baseline correct and save
-    EEG = pop_rmbase(EEG, params.baseline, []);
-    name = sprintf('%s %s %s.set', params.suffix{3}, INFO(subject_idx).ID, params.conditions{c}); 
-    [ALLEEG EEG CURRENTSET] = pop_newset(ALLEEG, EEG, c, 'setname', name, 'overwrite', 'on', 'gui', 'off');
-    EEG.filename = name;
-    eeglab redraw
-    
-    % extract information about rejected components
-    sspsir(c) = EEG.SSPSIR;
-end
-fprint('done.\n')
-
-% update info structure and save
-INFO(subject_idx).EEG.processing(12).process = sprintf('muscular artifact filtered out');
-INFO(subject_idx).EEG.processing(12).params.method = 'SSP-SIR';
-INFO(subject_idx).EEG.processing(12).params.specifics = 'all filters applied to datasets of all conditions';
-for c = 1:length(params.conditions)
-    INFO(subject_idx).EEG.processing(12).params.PC(c).condition = params.conditions{c};
-    INFO(subject_idx).EEG.processing(12).params.PC(c).PC = sspsir(c).PC;
-end
-INFO(subject_idx).EEG.processing(12).params.setings = rmfield(sspsir, 'PC');
-INFO(subject_idx).EEG.processing(12).suffix = params.suffix([3,4]);
-INFO(subject_idx).EEG.processing(12).date = sprintf('%s', date);
-save(output_file, 'INFO','-append')
-
-% apply SSP-SIR filters of other datasets
-fprintf('applying each filter to all other datasets:\n')
-for c = 1:length(params.conditions)
-    fprintf('%s dataset ...', params.conditions{c})
-
-    % select the dataset
-    EEG = ALLEEG(c);
-    [ALLEEG EEG CURRENTSET] = eeg_store(ALLEEG, EEG, c);
-    eeglab redraw
+        % select original data
+        visual.data(1, :) = squeeze(mean(dataset.preprocessed(a).data(:, visual.eoi, 1, 1, 1, :), 1));  
+        visual.sem(1, :) = squeeze(std(dataset.preprocessed(a).data(:, visual.eoi, 1, 1, 1, :), 0, 1)) / sqrt(size(dataset.preprocessed(a).data, 1)); 
+        visual.CI_upper(1, :) = visual.data(1, :) + visual.t_value * visual.sem(1, :); 
+        visual.CI_lower(1, :) = visual.data(1, :) - visual.t_value * visual.sem(1, :); 
             
-    % SSP-SIR 
-    other_datasets = 1:length(params.conditions);
-    other_datasets = other_datasets(other_datasets ~= c);
-    for a = other_datasets
-        [EEG_trials] = SSP_SIR_trials(EEG, INFO(subject_idx).EEG.processing(12).params.setings(c).L_ave, ...
-            INFO(subject_idx).EEG.processing(12).params.setings(a).topographies, ...
-            INFO(subject_idx).EEG.processing(12).params.setings(a).filter, []);
-        EEG.data =  EEG_trials.data;
+        % select filtered data
+        visual.data(2, :) = squeeze(mean(dataset.sspsir(a).data(:, visual.eoi, 1, 1, 1, :), 1));  
+        visual.sem(2, :) = squeeze(std(dataset.sspsir(a).data(:, visual.eoi, 1, 1, 1, :), 0, 1)) / sqrt(size(dataset.sspsir(a).data, 1)); 
+        visual.CI_upper(2, :) = visual.data(2, :) + visual.t_value * visual.sem(2, :); 
+        visual.CI_lower(2, :) = visual.data(2, :) - visual.t_value * visual.sem(2, :); 
+            
+        % plot
+        subplot(1, length(params.conditions), a)
+        plot_ERP(visual, 'xlim', visual.xlim, 'colours', visual.colors, 'labels', visual.labels)
+        title(sprintf('%s trials', params.conditions{a}))
     end
-    
-    % baseline correct and save
-    EEG = pop_rmbase(EEG, params.baseline, []);
-    name = sprintf('%s %s %s.set', params.suffix{4}, INFO(subject_idx).ID, params.conditions{c});
-    [ALLEEG EEG CURRENTSET] = pop_newset(ALLEEG, EEG, c, 'setname', name, 'overwrite', 'on', 'gui', 'off'); 
-    eeglab redraw
-    
-    % visual check - after SSP-SIR
-    figure; 
-    pop_timtopo(EEG, [-50  150], [5  15  30  45  60  100]);
-    sgtitle(sprintf('%s - %s: filtered data',  INFO(subject_idx).ID, params.conditions{c}))
-    figure_name = sprintf('TEP SSPSIR %s %s', INFO(subject_idx).ID, params.conditions{c});
-    savefig(sprintf('%s\\figures\\%s.fig', folder.output, figure_name))
-    saveas(gcf, sprintf('%s\\figures\\%s.svg', folder.output, figure_name))
-       
-    % save dataset
-    pop_saveset(EEG, 'filename', name, 'filepath', folder.processed);
+
+    % save and update figure counter
+    saveas(fig, sprintf('%s\\figures\\SSPSIR_%s.png', folder.output, INFO(subject_idx).ID))
+    figure_counter = figure_counter + 1;
 end
-fprint('done.\n')
 
-% add letswave 7 to the top of search path
-addpath(genpath([folder_toolbox '\letswave7-master']));
-
-% export data and header
-fprintf('exporting data back to letswave:\n')
-for c = 1:length(params.conditions)
-    fprintf('%s dataset ...', params.conditions{c})
-
-    % select the dataset in EEGLAB
-    EEG = ALLEEG(c);
-    [ALLEEG EEG CURRENTSET] = eeg_store(ALLEEG, EEG, c);
-    eeglab redraw
-    
-    % export in the letswave formate and save if required
-    name = sprintf('%s %s %s', params.suffix{4}, INFO(subject_idx).ID, params.conditions{c});
-    lwdata = export_lw(EEG, dataset.conditions(c).header, name);
-    dataset.sspsir(c).condition = params.conditions{c};
-    dataset.sspsir(c).header = lwdata.header;
-    dataset.sspsir(c).data = lwdata.data;
-    if params.lwsave
-        CLW_save([], lwdata.header, lwdata.data);
+% open letswave if not already open
+addpath(genpath([folder.toolbox '\letswave 6']));
+fig_all = findall(0, 'Type', 'figure');
+open = true;
+for f = 1:length(fig_all)
+    if contains(get(fig_all(f), 'Name'), 'Letswave', 'IgnoreCase', true)
+        open = false;
+        break;
     end
+end
+if open
+    letswave
+end
+fprintf('\n')
+
+% save and continue
+save(output_file, 'INFO','-append')
+clear a b c f e fig_all name match prompt discarded answer data header lwdata data2load definput dims dlgtitle eoi fig idx_start input latency code ...
+    n_epochs open tmpEEG tmpstr visual ALLCOM ALLEEG CURRENTSET CURRENTSTUDY EEG merged_EEG globalvars LASTCOM PLUGINLIST STUDY GUI_handle GUI_OK
+fprintf('section 4 finished.\nPlease check for bad trials now.\n\n')
+
+%% 5) ICA
+% ----- section input -----
+params.prefix = 'ar ffilt sspsir';
+params.conditions = {'baseline' 'delay'};
+params.suffix = {'ar' 'ica' 'icfilt'};
+params.ICA_comp = 40;
+params.plot_toi = [-0.1 0.5];
+params.plot_eoi = 'C3';
+% -------------------------
+fprintf('section 5: ICA\n')
+
+% load dataset with bad trials removed
+fprintf('updating dataset... ')
+if exist('dataset') ~= 1
+    % load previous dataset
+    data2load = dir(sprintf('%s*%s*', params.prefix(4:end), INFO(subject_idx).ID));
+    dataset = reload_dataset(data2load, [], 'sspsir');
+
+    % append new dataset
+    dataset_old = dataset;
+    data2load = dir(sprintf('%s*%s*', params.prefix, INFO(subject_idx).ID));
+    dataset = reload_dataset(data2load, [], 'checked');
+    dataset.sspsir = dataset_old.sspsir;
+else
+    % append new dataset
+    dataset_old = dataset;
+    data2load = dir(sprintf('%s*%s*', params.prefix, INFO(subject_idx).ID));
+    dataset = reload_dataset(data2load, [], 'checked');
+    dataset.sspsir = dataset_old.sspsir;
 end
 fprintf('done.\n')
 
-% close EEGLAB and clear     
-close eeglab
-clear params c t e i name char_start char_end epochs_start epochs_end figure_name sspsir other_datasets ...
-    data header lwdata ALLCOM ALLEEG CURRENTSET CURRENTSTUDY EEG globalvars LASTCOM PLUGINLIST STUDY
-fprintf('section 3 finished.\n\n')
+% encode bad trials
+fprintf('encoding bad trials... ')
+INFO(subject_idx).EEG.processing(13).process = sprintf('bad trials discarded');
+INFO(subject_idx).EEG.processing(13).params.GUI = 'letswave';
+INFO(subject_idx).EEG.processing(13).suffix = params.suffix{1};
+INFO(subject_idx).EEG.processing(13).date = sprintf('%s', date);
+for a = 1:length(params.conditions)
+    % extract discarded expochs
+    if ~isempty(dataset.checked(a).header.history(end).configuration)
+        if ~isempty(dataset.checked(a).header.history(end).configuration.parameters.rejected_epochs)
+            discarded = dataset.checked(a).header.history(end).configuration.parameters.rejected_epochs;
+        end
+    end
 
-%% 4) pre-process continuous data             
-% - applies bandpass frequency filter
-% - selects epochs from the pre-stimulus interval 
-% - saves for letswave 
-% ----- section input -----
-% -------------------------
-fprintf('section 4: pre-process continuous data\n')
-fprintf('section 4 finished.\n\n')
+    % encode 
+    INFO(subject_idx).EEG.processing(13).params.discarded{a} = discarded;
+    INFO(subject_idx).EEG.processing(13).params.kept(a) = size(dataset.checked(a).data, 1);
+end
+fprintf('done.\n')
 
-%% 5) ICA
-% - applies bandpass frequency filter
-% - calculates ICA matrix for all datasets together
-% - encodes discarded ICs
-% - saves for letswave
-% ----- section input -----
-% -------------------------
-fprintf('section 5: ICA\n')
-fprintf('section 5 finished.\n\n')
+% add letswave 7 to the top of search path
+addpath(genpath([folder.toolbox '\letswave 7']));
+  
+% compute ICA and save  
+lwdataset = dataset.checked;
+fprintf('computing ICA matrix:\n')
+option = struct('ICA_mode', 2, 'algorithm', 1, 'num_ICs', params.ICA_comp, 'suffix', params.suffix{2}, 'is_save', 1);
+lwdataset = FLW_compute_ICA_merged.get_lwdataset(lwdataset, option);
+fprintf('done.\n')
 
-%% 6) extract TEP measures
+% extract ICA parameters
+matrix.mix = lwdataset(1).header.history(end).option.mix_matrix;
+matrix.unmix = lwdataset(1).header.history(end).option.unmix_matrix;    
+params.ICA_chanlocs = lwdataset(1).header.chanlocs;
+for i = 1:size(matrix.mix, 2)
+    params.ICA_labels{i} = ['IC',num2str(i)];
+end
+params.ICA_SR = 1/lwdataset(1).header.xstep;
+
+% update dataset and adjust for letswave 6
+dataset.ica = lwdataset;
+for b = 1:length(params.conditions)
+    dataset.ica(b).header.history(end).configuration.gui_info.function_name = 'LW_ICA_compute_merged';  
+    dataset.ica(b).header.history(end).configuration.parameters = dataset.ica(b).header.history(end).option;  
+    [dataset.ica(b).header.history(end).configuration.parameters.ICA_um] = dataset.ica(b).header.history(end).configuration.parameters.unmix_matrix; 
+    [dataset.ica(b).header.history(end).configuration.parameters.ICA_mm] = dataset.ica(b).header.history(end).configuration.parameters.mix_matrix; 
+    dataset.ica(b).header.history(end).configuration.parameters = rmfield(dataset.ica(b).header.history(end).configuration.parameters, {'unmix_matrix' 'mix_matrix'});
+    header = dataset.ica(b).header;
+    save(sprintf('%s.lw6', dataset.ica(b).header.name), 'header');
+end
+
+% unmix data
+for b = 1:length(dataset.ica)
+    for e = 1:size(dataset.ica(b).data, 1)
+        dataset.unmixed(b).header = dataset.ica(b).header;
+        dataset.unmixed(b).data(e, :, 1, 1, 1, :) = matrix.unmix * squeeze(dataset.ica(b).data(e, :, 1, 1, 1, :));        
+    end
+end
+
+% update info structure
+INFO(subject_idx).EEG.processing(14).process = 'ICA matrix computed';
+INFO(subject_idx).EEG.processing(14).params.method = 'runica';
+INFO(subject_idx).EEG.processing(14).params.components = params.ICA_comp;
+INFO(subject_idx).EEG.processing(14).params.chanlocs = params.ICA_chanlocs;
+INFO(subject_idx).EEG.processing(14).params.labels = params.ICA_labels;
+INFO(subject_idx).EEG.processing(14).params.SR = params.ICA_SR;
+INFO(subject_idx).EEG.processing(14).params.matrix = matrix;
+INFO(subject_idx).EEG.processing(14).suffix = params.suffix{2};
+INFO(subject_idx).EEG.processing(14).date = sprintf('%s', date);
+ 
+% calculate PSD across all timepoints, components and trials 
+fprintf('estimating spectral content of ICs...\n')
+psd = [];
+for b = 1:length(params.conditions)
+    for c = 1:params.ICA_comp
+        for e = 1:size(dataset.unmixed(b).data, 1)
+            [psd(b, c, e, :), freq] = pwelch(squeeze(dataset.unmixed(b).data(e, c, 1, 1, 1, :)), ...
+                [], [], [], INFO(subject_idx).EEG.processing(14).params.SR);  
+        end
+    end
+end
+INFO(subject_idx).EEG.processing(14).params.PSD = squeeze(mean(psd, [1, 3]));
+fprintf('done.\n')
+
+% plot IC spectral content (in 2 figures to keep the size readable)
+for a = 1:2
+    figure('units','normalized','outerposition',[0 0 1 1]);
+    hold on
+    components2plot = (a-1)*(params.ICA_comp/2) + [1:ceil(params.ICA_comp/2)];
+    for f = 1:ceil(params.ICA_comp/2)
+        % plot the topography
+        matrix = INFO(subject_idx).EEG.processing(14).params.matrix.mix;
+        subplot(ceil(length(components2plot)/3), 6, (f-1)*2 + 1);
+        topoplot(double(matrix(:, components2plot(f))'), params.ICA_chanlocs, 'maplimits', [-4 4], 'shading', 'interp', 'whitebk', 'on', 'electrodes', 'off')
+        set(gca,'color',[1 1 1]);
+        title(params.ICA_labels{components2plot(f)})
+    
+        % plot the psd
+        subplot(ceil(length(components2plot)/3), 6, (f-1)*2 + 2);
+        plot(freq(1:max(find(freq <= 80))), log10(INFO(subject_idx).EEG.processing(14).params.PSD(components2plot(f), 1:max(find(freq <= 80)))));
+        xlabel('Frequency (Hz)');
+        ylabel('Power (dB)');
+    end
+    saveas(gcf, sprintf('%s\\figures\\ICA_%s_%d.png', folder.output, INFO(subject_idx).ID, a));
+end
+
+% open letswave if not already open
+fig_all = findall(0, 'Type', 'figure');
+open = true;
+for f = 1:length(fig_all)
+    if contains(get(fig_all(f), 'Name'), 'Letswave', 'IgnoreCase', true)
+        open = false;
+        break;
+    end
+end
+if open
+    fprintf('opening letswave:\n')
+    addpath(genpath([folder.toolbox '\letswave 6']));
+    letswave
+end
+
+% identify outcome filenames and wait for datasets to appear
+for a = 1:length(params.conditions)
+    filenames{(a-1)*2 + 1} = sprintf('%s %s %s %s %s %s.lw6', params.suffix{3}, params.suffix{2}, params.prefix, study, INFO(subject_idx).ID, params.conditions{a});
+    filenames{(a-1)*2 + 2} = sprintf('%s %s %s %s %s %s.mat', params.suffix{3}, params.suffix{2}, params.prefix, study, INFO(subject_idx).ID, params.conditions{a});
+end
+wait4files(filenames);
+close(gcf)
+
+% load filtered data
+fprintf('loading filtered dataset...\n')
+for a = 1:length(dataset.ica)
+    data_name = sprintf('%s %s %s %s %s %s', params.suffix{3}, params.suffix{2}, params.prefix, study, INFO(subject_idx).ID, params.conditions{a});
+    load(sprintf('%s.lw6', data_name), '-mat');
+    dataset.ica_filtered(a).header = header; 
+    load(sprintf('%s.mat', data_name));
+    dataset.ica_filtered(a).data = data; 
+end
+fprintf('done.\n')
+
+% ask for the input
+prompt = {'blinks:', 'horizontal:', 'TMS:', 'muscles:', 'slow artifacts:'};
+dlgtitle = 'ICA';  
+dims = [1 60];
+definput = {'', '', '', '', ''};
+input = inputdlg(prompt,dlgtitle,dims,definput);
+
+% encode ICA 
+INFO(subject_idx).EEG.processing(15).process = 'artifactual ICs discarded';
+INFO(subject_idx).EEG.processing(15).suffix = params.suffix{3};
+INFO(subject_idx).EEG.processing(15).date = sprintf('%s', date);
+INFO(subject_idx).EEG.processing(15).params.kept = params.ICA_comp - length([str2num(input{1}), str2num(input{2}), str2num(input{3}), str2num(input{4}), str2num(input{5})]);
+INFO(subject_idx).EEG.processing(15).params.removed.blinks = str2num(input{1});
+INFO(subject_idx).EEG.processing(15).params.removed.horizontal = str2num(input{2});
+INFO(subject_idx).EEG.processing(15).params.removed.TMS = str2num(input{3});
+INFO(subject_idx).EEG.processing(15).params.removed.muscles = str2num(input{4});
+INFO(subject_idx).EEG.processing(15).params.removed.slow = str2num(input{5});
+save(output_file, 'INFO','-append')
+
+% launch the figure
+fig_all = findall(0, 'Type', 'figure');
+figure_counter = length(fig_all) + 1;
+fig = figure(figure_counter);
+screen_size = get(0, 'ScreenSize');
+set(fig, 'Position', [screen_size(3)/4, screen_size(4)/4, screen_size(3) / 2.5, screen_size(4) / 2])
+
+% define common visual parameters
+params.labels = {dataset.ica(1).header.chanlocs.labels};
+visual.x = dataset.ica(1).header.xstart : dataset.ica(1).header.xstep : ...
+    dataset.ica(1).header.xstep * dataset.ica(1).header.datasize(6) + dataset.ica(1).header.xstart - dataset.ica(1).header.xstep;
+visual.labels = params.conditions;
+visual.xlim = params.plot_toi;
+visual.colors = [0.9216    0.1490    0.1490;
+                0    0.4471    0.7412];
+visual.eoi  = find(strcmp(params.labels, params.plot_eoi));
+
+% extract mean signal per condition
+for a = 1:length(params.conditions)
+    % subset data
+    data2plot = squeeze(dataset.ica_filtered(a).data(:, visual.eoi, 1, 1, 1, :));
+
+    % define t value
+    visual.t_value = tinv(0.975, size(data2plot, 1) - 1); 
+
+    % select original data
+    visual.data(a, :) = mean(data2plot, 1)';  
+    visual.sem(a, :) = std(data2plot, 0, 1)' / sqrt(size(data2plot, 1)); 
+    visual.CI_upper(a, :) = visual.data(a, :) + visual.t_value * visual.sem(a, :); 
+    visual.CI_lower(a, :) = visual.data(a, :) - visual.t_value * visual.sem(a, :);
+end
+
+% plot
+plot_ERP(visual, 'xlim', visual.xlim, 'colours', visual.colors, 'labels', visual.labels)
+
+% save and update counter
+saveas(fig, sprintf('%s\\figures\\TEP_%s_%s.png', folder.output, params.plot_eoi, INFO(subject_idx).ID))
+figure_counter = figure_counter + 1;
+
+% ask for continuation
+fprintf('section 5 finished.\n')
+answer = questdlg('do you want to continue with next subject?', 'Continue?', 'YES', 'NO', 'YES'); 
+if strcmp(answer, 'YES')
+    subject_idx = subject_idx + 1;
+    clear dataset
+    fprintf('proceeding to subject %d.\n\n', subject_idx)
+end
+clear a b c d e f i data2load check discarded match prompt definput input input_old dims dlgtitle matrix fig_all open ...
+    psd freq option lwdataset labels header dataset_old components2plot filenames data_name data2plot answer data fig screen_size visual
+
+%% extract TEP measures
 % - calculates average TEP GFP and identifies peaks
 % - plots average TEP with peak topographies
 % - ...
 % ----- section input -----
 % -------------------------
-fprintf('section 6: extract TEP measures\n')
-fprintf('section 6 finished.\n\n')
+fprintf('section : extract TEP measures\n')
+fprintf('section  finished.\n\n')
 
-%% 7) extract beta measures
+%% extract beta measures
 % ----- section input -----
 % -------------------------
 fprintf('section 7: extract beta measures\n')
@@ -1050,7 +1374,101 @@ if length(datas) == length(headers)
 else
     error('ERROR: Wrong number of available datasets to load! Check manually.')
 end
-
+end
+function initialize_logfile(INFO, subject_idx, filename)
+fileID = fopen(filename, 'w');
+fprintf(fileID, sprintf('********** EVENT ANALYSIS **********\r\n')); 
+fprintf(fileID, sprintf('subject: %s\r\n', INFO(subject_idx).ID));
+fprintf(fileID, sprintf('date of experiment: %s\r\n', INFO(subject_idx).session.date));
+fprintf(fileID, '\r\n');
+fclose(fileID);
+end
+function logfile_entry(info, filename)
+fileID = fopen(filename, 'a');
+fprintf(fileID, sprintf('*** recording block %d ***\r\n', info.block));
+fprintf(fileID, sprintf('trials in total: %d\r\n', info.trials));
+fprintf(fileID, '\r\n');
+fprintf(fileID, sprintf('baseline trials %d:\r\n', info.baseline.trials));
+fprintf(fileID, sprintf('     - mean delay from start to stimulus: %ds (min: %ds; max: %ds)\r\n', ...
+    info.baseline.delay.stimulus.mean, info.baseline.delay.stimulus.min, info.baseline.delay.stimulus.max));
+fprintf(fileID, sprintf('     - mean delay from stimulus to preparatory cue: %ds (min: %ds; max: %ds)\r\n', ...
+    info.baseline.delay.preparatory.mean, info.baseline.delay.preparatory.min, info.baseline.delay.preparatory.max));
+fprintf(fileID, sprintf('     - mean delay from preparatory cue to imperative cue: %ds (min: %ds; max: %ds)\r\n', ...
+    info.baseline.delay.imperative.mean, info.baseline.delay.imperative.min, info.baseline.delay.imperative.max));
+fprintf(fileID, '\r\n');
+fprintf(fileID, sprintf('delay trials %d:\r\n', info.delay.trials));
+fprintf(fileID, sprintf('     - mean delay from start to preparatory cue: %ds (min: %ds; max: %ds)\r\n', ...
+    info.delay.delay.preparatory.mean, info.delay.delay.preparatory.min, info.delay.delay.preparatory.max));
+fprintf(fileID, sprintf('     - mean delay from preparatory cue to stimulus: %ds (min: %ds; max: %ds)\r\n', ...
+    info.delay.delay.stimulus.mean, info.delay.delay.stimulus.min, info.delay.delay.stimulus.max));
+fprintf(fileID, sprintf('     - mean delay from stimulus to imperative cue: %ds (min: %ds; max: %ds)\r\n', ...
+    info.delay.delay.imperative.mean, info.delay.delay.imperative.min, info.delay.delay.imperative.max));
+fprintf(fileID, '\r\n');
+fclose(fileID);
+end
+function export_EEGLAB(lwdata, filename, subj)
+% =========================================================================
+% exports data from letswave to EEGLAB format
+% =========================================================================  
+% dataset
+EEG.setname = filename;
+EEG.filename = [];
+EEG.filepath = [];
+EEG.subject = subj; 
+EEG.session = 1;
+    
+% time properties
+EEG.nbchan = lwdata.header.datasize(2);
+EEG.trials = lwdata.header.datasize(1);
+EEG.pnts = lwdata.header.datasize(6);
+EEG.srate = 1/lwdata.header.xstep;
+EEG.times = lwdata.header.xstart + (0:EEG.pnts-1)*lwdata.header.xstep;
+EEG.xmin = EEG.times(1);
+EEG.xmax = EEG.times(end);
+EEG.data = permute(single(lwdata.data),[2,6,1,3,4,5]);
+EEG.chanlocs = rmfield(lwdata.header.chanlocs, 'SEEG_enabled');
+EEG.chanlocs = rmfield(lwdata.header.chanlocs, 'topo_enabled');
+    
+% create events with appropriate latencies
+EEG.event = lwdata.header.events;
+if ~isempty(EEG.event)
+    [EEG.event.type] = EEG.event.code;
+    for e = 1:length(EEG.event)
+        EEG.event(e).latency = (e-1)*EEG.pnts + EEG.xmin*(-1)*EEG.srate;
+    end
+    EEG.event = rmfield(EEG.event,'code');
+end
+    
+% create required empty fields
+EEG.icawinv = [];
+EEG.icaweights = [];
+EEG.icasphere = [];
+EEG.icaweights = [];
+EEG.icaweights = [];
+EEG.icaweights = [];
+EEG.icaweights = [];
+save([filename,'.set'], 'EEG');
+end
+function lwdata = export_lw(EEG, header, name)
+% =========================================================================
+% exports data from EEGLAB to letswave format
+% ========================================================================= 
+% transform data
+data = [];
+for t = 1:size(EEG.data, 3)
+    for e = 1:size(EEG.data, 1)
+        for i = 1:size(EEG.data, 2)
+            data(t, e, 1, 1, 1, i) = EEG.data(e, i, t);
+        end
+    end
+end
+lwdata.data = data;    
+    
+% modify header
+lwdata.header = header; 
+lwdata.header.name = name;
+lwdata.header.datasize = size(lwdata.data);
+lwdata.header.chanlocs = lwdata.header.chanlocs(1:size(lwdata.data, 2));
 end
 function plot_ERP(input, varargin)
 % =========================================================================
@@ -1066,11 +1484,12 @@ function plot_ERP(input, varargin)
 %           colours --> n*3 matrix of RGB values
 %           shading --> 'on'(default)/'off'
 %           alpha --> a float (default 0.2)           
-%           plot_legend --> 'on'(default)/'off'
+%           legend --> 'on'(default)/'off'
 %           labels --> cell array with labels for the legend  
 %           legend_loc --> legend location (default 'southeast')
 %           eoi --> label of a channel to be highlighted
 %           reverse --> 'on'/'off'(default) - flips y axis
+%           interpolated --> time window that was interpolated
 % =========================================================================  
 % set defaults
 x_limits = [0,0];
@@ -1085,6 +1504,7 @@ end
 legend_loc = 'southeast';
 highlight = false;
 reverse = false;
+interpolate = false;
 
 % check for varargins
 if ~isempty(varargin)
@@ -1140,7 +1560,15 @@ if ~isempty(varargin)
     i = find(strcmpi(varargin, 'eoi'));
     if ~isempty(i)
         eoi = varargin{i + 1};
+        eoi_n = find(contains(input.chanlabels, eoi));
         highlight = true;
+    end 
+
+    % interpolated interval - default off
+    j = find(strcmpi(varargin, 'interpolated'));
+    if ~isempty(j)
+        interpolate_toi = varargin{j + 1};
+        interpolate = true;
     end 
 
     % reverse y axis - default off
@@ -1166,18 +1594,28 @@ if y_limits(1) == 0 && y_limits(2) == 0
     y_limits = ylim;
 end
 
-% plot stimulus
-line([0, 0], y_limits, 'Color', 'black', 'LineWidth', 2.5, 'LineStyle', '--')
-
 % highlight channel if required
 if highlight
-    P(end + 1) = plot(input.x, input.data(eoi, :), 'Color', [0.9216    0.1490    0.1490], 'LineWidth', 3);
+    P(end + 1) = plot(input.x, input.data(eoi_n, :), 'Color', [0.9216    0.1490    0.1490], 'LineWidth', 4);
+    hold on
 end
+
+% shade interpolated window if required
+if interpolate
+    interpolate_x = [interpolate_toi(1), interpolate_toi(2), interpolate_toi(2), interpolate_toi(1)];
+    interpolate_y = [y_limits(1), y_limits(1), y_limits(2), y_limits(2)];
+    fill(interpolate_x, interpolate_y, [0.5 0.5 0.5], 'FaceAlpha', 0.5, 'EdgeColor', 'none');
+end
+
+% plot stimulus
+line([0, 0], y_limits, 'Color', 'black', 'LineWidth', 2.5, 'LineStyle', '--')
 
 % plot legend if required
 if plot_legend 
     legend(P, labels, 'Location', legend_loc, 'fontsize', 14)
     legend('boxoff');
+else
+    legend('off')
 end
 
 % axes
@@ -1202,179 +1640,36 @@ if reverse
 end
 
 % other parameters
-xlabel('time (ms)')
+xlabel('time (s)')
 ylabel('amplitude (\muV)')
 set(gca, 'FontSize', 14)
 ylim(y_limits)
 set(gca, 'Layer', 'Top')
 end
-function export_EEGLAB(lwdata, filename, subj)
+function wait4files(filenames)
 % =========================================================================
-% exports data from letswave to EEGLAB format
-% =========================================================================  
-% dataset
-EEG.setname = filename;
-EEG.filename = [];
-EEG.filepath = [];
-EEG.subject = subj; 
-EEG.session = 1;
+% waitForFiles pauses the script until all required files appear in the
+% working working directory
+% --> file names are specified in a cell array
+% =========================================================================    
+% loop to wait for files
+while true
+    allFilesExist = true;
     
-% time properties
-EEG.nbchan = lwdata.header.datasize(2);
-EEG.trials = lwdata.header.datasize(1);
-EEG.pnts = lwdata.header.datasize(6);
-EEG.srate = 1/lwdata.header.xstep;
-EEG.times = lwdata.header.xstart + (0:EEG.pnts-1)*lwdata.header.xstep;
-EEG.xmin = EEG.times(1);
-EEG.xmax = EEG.times(end);
-EEG.data = permute(single(lwdata.data),[2,6,1,3,4,5]);
-EEG.chanlocs = rmfield(lwdata.header.chanlocs, 'SEEG_enabled');
-EEG.chanlocs = rmfield(lwdata.header.chanlocs, 'topo_enabled');
-    
-% create events with appropriate latencies
-EEG.event = lwdata.header.events;
-if ~isempty(EEG.event)
-    [EEG.event.type] = EEG.event.code;
-    for e = 1:length(EEG.event)
-        EEG.event(e).latency = (e-1)*EEG.pnts + 2001;
-    end
-    EEG.event = rmfield(EEG.event,'code');
-end
-    
-% global tags
-EEG.global_tags = lwdata.header.global_tags;
-    
-% create required empty fields
-EEG.icawinv = [];
-EEG.icaweights = [];
-EEG.icasphere = [];
-EEG.icaweights = [];
-EEG.icaweights = [];
-EEG.icaweights = [];
-EEG.icaweights = [];
-save([filename,'.set'], 'EEG');
-end
-function [lwdata] = export_lw(EEG, header, name)
-% =========================================================================
-% exports data from EEGLAB to letswave format
-% ========================================================================= 
-% transform data
-data = [];
-for t = 1:size(EEG.data, 3)
-    for e = 1:size(EEG.data, 1)
-        for i = 1:size(EEG.data, 2)
-            data(t, e, 1, 1, 1, i) = EEG.data(e, i, t);
+    % check for each file
+    for i = 1:length(filenames)
+        if isempty(dir(filenames{i}))
+            allFilesExist = false;
+            break;
         end
     end
-end
-lwdata.data = data;    
     
-% modify header
-lwdata.header = header; 
-lwdata.header.name = name;
-lwdata.header.datasize = size(lwdata.data);
-lwdata.header.chanlocs = lwdata.header.chanlocs(1:size(lwdata.data, 2));
-lwdata.header.events = lwdata.header.events(1:size(lwdata.data, 1));
-end
-function [EEG_out] = SSP_SIR_trials(EEG_in, L, art_topographies, filt_ker, M)
-% =========================================================================
-% applies SSP-SIR using existing filters
-% ========================================================================= 
-%     L = param(c).L_ave;
-%     EEG_in = EEG;
-%     art_topographies = rmfield(param, {'PC', 'filter', 'L_ave'});
-%     filt_ker = param(c).filter;
-%     M = [];
-%     EEG_out = EEG_in;
-%     
-%     % prepare individual filters
-%     for t = 1:length(art_topographies)
-%         statement = sprintf('P%d = eye(size(EEG_in.data,1)) - art_topographies(t).topographies*art_topographies(t).topographies'';', t);
-%         eval(statement)
-%     end
-%     
-%     % create final composite filter
-%     statement = 'P = P1';
-%     if length(art_topographies) > 1
-%         for t = 2:length(art_topographies)
-%             statement = [statement sprintf(' * P%d', t)];
-%         end
-%     end
-%     statement = [statement ';'];
-%     eval(statement);
-
-EEG_out = EEG_in;
-P = eye(size(EEG_in.data,1)) - art_topographies*art_topographies';
-
-% apply filter
-for i = 1:size(EEG_in.data,3)
-
-    data = EEG_in.data(:,:,i);
-
-    % suppressing the artifacts:
-    data_clean = P*data;
-
-    % performing SIR for the suppressed data:
-    PL = P*L;
-
-    if isempty (M)
-        M = rank(data_clean) -  1 ;
+    % if all files exist, break the loop
+    if allFilesExist
+        break;
     end
-
-    tau_proj = PL*PL';
-    [U,S,V] = svd(tau_proj);
-    S_inv = zeros(size(S));
-    S_inv(1:M,1:M) = diag(1./diag(S(1:M,1:M)));
-    tau_inv = V*S_inv*U';
-    suppr_data_SIR = L*(PL)'*tau_inv*data_clean;
-
-    % performing SIR for the original data:
-    tau_proj = L*L';
-    [U,S,V] = svd(tau_proj);
-    S_inv = zeros(size(S));
-    S_inv(1:M,1:M) = diag(1./diag(S(1:M,1:M)));
-    tau_inv = V*S_inv*U';
-    orig_data_SIR = L*(L)'*tau_inv*data;
-
-    if isempty(filt_ker)
-        data_correct = suppr_data_SIR;
-    else
-        filt_ker_B = repmat(filt_ker,[size(suppr_data_SIR,1),1]);
-        data_correct = filt_ker_B.*suppr_data_SIR + orig_data_SIR - filt_ker_B.*orig_data_SIR;
-        filt_ker_B = [];
-    end
-
-    EEG_out.data(:,:,i) = data_correct;
+    
+    % pause for 2s
+    pause(2);
 end
-end
-function initialize_logfile(INFO, subject_idx, filename)
-fileID = fopen(filename, 'w');
-fprintf(fileID, sprintf('********** EVENT ANALYSIS **********\r\n')); 
-fprintf(fileID, sprintf('subject: %s\r\n', INFO(subject_idx).ID));
-fprintf(fileID, sprintf('date of experiment: %s\r\n', INFO(subject_idx).session.date));
-fprintf(fileID, '\r\n');
-fclose(fileID);
-end
-function logfile_entry(info, filename)
-fileID = fopen(filename, 'a');
-fprintf(fileID, sprintf('*** recording block %d ***\r\n', info.block));
-fprintf(fileID, sprintf('trials in total: %d\r\n', info.trials));
-fprintf(fileID, '\r\n');
-fprintf(fileID, sprintf('baseline trials %d:\r\n', info.baseline.trials));
-fprintf(fileID, sprintf('     - mean delay from start to stimulus: %ds (min: %ds; max: %ds)\r\n', ...
-    info.baseline.delay.stimulus.mean, info.baseline.delay.stimulus.min, info.baseline.delay.stimulus.max));
-fprintf(fileID, sprintf('     - mean delay from stimulus to preparatory cue: %ds (min: %ds; max: %ds)\r\n', ...
-    info.baseline.delay.preparatory.mean, info.baseline.delay.preparatory.min, info.baseline.delay.preparatory.max));
-fprintf(fileID, sprintf('     - mean delay from preparatory cue to imperative cue: %ds (min: %ds; max: %ds)\r\n', ...
-    info.baseline.delay.imperative.mean, info.baseline.delay.imperative.min, info.baseline.delay.imperative.max));
-fprintf(fileID, '\r\n');
-fprintf(fileID, sprintf('delay trials %d:\r\n', info.delay.trials));
-fprintf(fileID, sprintf('     - mean delay from start to preparatory cue: %ds (min: %ds; max: %ds)\r\n', ...
-    info.delay.delay.preparatory.mean, info.delay.delay.preparatory.min, info.delay.delay.preparatory.max));
-fprintf(fileID, sprintf('     - mean delay from preparatory cue to stimulus: %ds (min: %ds; max: %ds)\r\n', ...
-    info.delay.delay.stimulus.mean, info.delay.delay.stimulus.min, info.delay.delay.stimulus.max));
-fprintf(fileID, sprintf('     - mean delay from stimulus to imperative cue: %ds (min: %ds; max: %ds)\r\n', ...
-    info.delay.delay.imperative.mean, info.delay.delay.imperative.min, info.delay.delay.imperative.max));
-fprintf(fileID, '\r\n');
-fclose(fileID);
 end
